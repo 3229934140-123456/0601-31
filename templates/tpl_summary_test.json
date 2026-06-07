@@ -3,12 +3,18 @@
   "name": "内容摘要模板",
   "description": "为给定内容生成简洁摘要",
   "systemPrompt": "你是一名专业的内容编辑，擅长提取文章核心要点，生成精炼的摘要。",
-  "userPrompt": "请为以下内容生成摘要：\n\n{{content}}",
+  "userPrompt": "请用{{tone}}的语气为以下内容生成摘要：\n\n{{content}}",
   "variables": [
     {
       "name": "content",
       "type": "text",
       "description": "需要摘要的原始内容",
+      "required": true
+    },
+    {
+      "name": "tone",
+      "type": "string",
+      "description": "语气风格",
       "required": true
     }
   ],

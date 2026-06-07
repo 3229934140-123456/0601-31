@@ -10,15 +10,25 @@ export function renderTemplate(template: string, variables: Record<string, any>)
   return result;
 }
 
-export function extractVariables(template: string): string[] {
+export function extractVariables(userPrompt: string, systemPrompt?: string): string[] {
   const regex = /\{\{\s*(\w+)\s*\}\}/g;
   const variables: string[] = [];
   let match;
-  while ((match = regex.exec(template)) !== null) {
+
+  while ((match = regex.exec(userPrompt)) !== null) {
     if (!variables.includes(match[1])) {
       variables.push(match[1]);
     }
   }
+
+  if (systemPrompt) {
+    while ((match = regex.exec(systemPrompt)) !== null) {
+      if (!variables.includes(match[1])) {
+        variables.push(match[1]);
+      }
+    }
+  }
+
   return variables;
 }
 
@@ -76,7 +86,7 @@ export function createTemplate(options: {
   summaryLength?: string;
 }): PromptTemplate {
   const now = new Date().toISOString();
-  const extractedVars = extractVariables(options.userPrompt);
+  const extractedVars = extractVariables(options.userPrompt, options.systemPrompt);
   const existingVarNames = options.variables?.map(v => v.name) || [];
   const autoVars = extractedVars
     .filter(name => !existingVarNames.includes(name))
@@ -101,6 +111,29 @@ export function createTemplate(options: {
     summaryLength: options.summaryLength,
     createdAt: now,
     updatedAt: now,
+  };
+}
+
+export function refreshTemplateVariables(template: PromptTemplate): PromptTemplate {
+  const extractedVarNames = extractVariables(template.userPrompt, template.systemPrompt);
+  const existingVarsMap = new Map(template.variables.map(v => [v.name, v]));
+
+  const newVariables: TemplateVariable[] = extractedVarNames.map(name => {
+    if (existingVarsMap.has(name)) {
+      return existingVarsMap.get(name)!;
+    }
+    return {
+      name,
+      type: 'string',
+      description: `变量 ${name}`,
+      required: true,
+    };
+  });
+
+  return {
+    ...template,
+    variables: newVariables,
+    updatedAt: new Date().toISOString(),
   };
 }
 

@@ -11,7 +11,7 @@ import { renderTemplate, validateVariables } from '../core/template';
 import { checkQuality } from '../core/quality';
 import { estimateBatchCost, formatCost } from '../core/cost';
 import { BatchJob, TaskResult, PromptTemplate } from '../types';
-import { generateId, formatDate, readTextFilesFromDir, sleep } from '../utils';
+import { generateId, formatDate, readTextFilesFromDir, sleep, parseVariables } from '../utils';
 
 let isPaused = false;
 let shouldStop = false;
@@ -83,21 +83,50 @@ export function registerBatchCommand(program: Command): void {
         return;
       }
 
+      const commonVars = options.var && options.var.length > 0
+        ? parseVariables(options.var)
+        : {};
+
+      const autoProvidedVars = new Set(['content', 'fileName', 'sourceFile']);
+      const requiredVars = tpl.variables.filter(v => v.required);
+      const missingVars = requiredVars
+        .filter(v => !autoProvidedVars.has(v.name) && commonVars[v.name] === undefined)
+        .map(v => v.name);
+
+      if (missingVars.length > 0) {
+        console.log(chalk.red(`✗ 缺少必填变量: ${missingVars.join(', ')}`));
+        console.log(chalk.gray(`请使用 --var ${missingVars.map(v => `${v}=值`).join(' ')} 提供这些变量`));
+        console.log(chalk.gray(`模板变量: ${tpl.variables.map(v => v.name + (v.required ? ' *' : '')).join(', ')}`));
+        return;
+      }
+
+      if (Object.keys(commonVars).length > 0) {
+        console.log(chalk.cyan(`公共变量: ${Object.keys(commonVars).length} 个`));
+      }
+
       const batchName = options.name || `batch_${generateId()}`;
       const batchId = generateId('batch');
       const concurrency = options.concurrency || config.concurrency;
       const maxRetries = options.retries !== undefined ? options.retries : config.maxRetries;
 
-      const prompts = inputFiles.map(f => renderTemplate(template.userPrompt, { content: f.content, fileName: f.fileName }));
-      const { totalCost, totalInputTokens, totalOutputTokens } = estimateBatchCost(prompts, config);
+      const sampleVars = { ...commonVars, content: '', fileName: '' };
+      const samplePrompt = renderTemplate(tpl.userPrompt, sampleVars);
+      const sampleSystemPrompt = tpl.systemPrompt ? renderTemplate(tpl.systemPrompt, sampleVars) : '';
+      const promptPerFileLength = samplePrompt.length + sampleSystemPrompt.length;
+      const estimatedTotalInputTokens = promptPerFileLength * inputFiles.length / 4;
+      const estimatedOutputTokens = 500 * inputFiles.length;
+      const { totalCost } = estimateBatchCost(
+        Array(inputFiles.length).fill(samplePrompt),
+        config
+      );
 
       console.log(chalk.bold.cyan('\n📦 批量任务预览\n'));
       console.log(chalk.cyan(`批量任务: ${batchName}`));
-      console.log(chalk.cyan(`模板: ${template.name}`));
+      console.log(chalk.cyan(`模板: ${tpl.name}`));
       console.log(chalk.cyan(`文件数量: ${inputFiles.length}`));
       console.log(chalk.cyan(`并发数: ${concurrency}`));
       console.log(chalk.cyan(`预估成本: ${formatCost(totalCost)}`));
-      console.log(chalk.cyan(`预估 Token: 输入 ${totalInputTokens}, 输出 ${totalOutputTokens}`));
+      console.log(chalk.cyan(`预估 Token: 输入 ~${Math.round(estimatedTotalInputTokens)}, 输出 ~${estimatedOutputTokens}`));
 
       if (options.dryRun) {
         console.log(chalk.gray('\n(Dry Run 模式，未实际执行)'));
@@ -122,12 +151,17 @@ export function registerBatchCommand(program: Command): void {
 
       const tasks: TaskResult[] = inputFiles.map((file, index) => ({
         id: generateId('task'),
-        taskName: `${template.name}_${file.fileName}`,
-        templateId: template.id,
-        templateName: template.name,
-        input: { content: file.content, fileName: file.fileName, sourceFile: file.filePath },
+        taskName: `${tpl.name}_${file.fileName}`,
+        templateId: tpl.id,
+        templateName: tpl.name,
+        input: {
+          ...commonVars,
+          content: file.content,
+          fileName: file.fileName,
+          sourceFile: file.filePath,
+        },
         output: '',
-        model: template.model || config.defaultModel,
+        model: tpl.model || config.defaultModel,
         tokens: { input: 0, output: 0, total: 0 },
         cost: 0,
         status: 'pending' as const,

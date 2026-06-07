@@ -14,10 +14,61 @@ export function registerHistoryCommand(program: Command): void {
     .command('list')
     .description('列出历史任务')
     .option('-n, --limit <number>', '显示数量', parseInt)
-    .option('--type <type>', '任务类型: run|batch|review')
+    .option('--type <type>', '任务类型: run|batch')
     .option('--status <status>', '按状态筛选')
     .action((options) => {
       const history = loadHistory();
+      const type = options.type || 'run';
+
+      const validTypes = ['run', 'batch'];
+      if (!validTypes.includes(type)) {
+        console.log(chalk.red(`✗ 无效的类型: ${type}`));
+        console.log(chalk.gray(`支持的类型: ${validTypes.join(', ')}`));
+        return;
+      }
+
+      if (type === 'batch') {
+        let batches = [...history.batches];
+
+        if (options.status) {
+          batches = batches.filter(b => b.status === options.status);
+        }
+
+        batches.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+        const limit = options.limit || 20;
+        const displayBatches = batches.slice(0, limit);
+
+        if (displayBatches.length === 0) {
+          console.log(chalk.yellow('暂无批量任务历史'));
+          return;
+        }
+
+        const table = new Table({
+          head: [chalk.cyan('批次ID'), chalk.cyan('名称'), chalk.cyan('模板'), chalk.cyan('状态'), chalk.cyan('完成/总数'), chalk.cyan('创建时间')],
+          colWidths: [15, 20, 20, 12, 14, 20],
+        });
+
+        for (const batch of displayBatches) {
+          const statusColor = batch.status === 'completed' ? chalk.green :
+            batch.status === 'failed' ? chalk.red :
+            batch.status === 'paused' ? chalk.yellow : chalk.blue;
+
+          table.push([
+            batch.id.substr(0, 12) + '...',
+            batch.name.substr(0, 15),
+            batch.templateId.substr(0, 15),
+            statusColor(batch.status),
+            `${batch.completedTasks}/${batch.totalTasks}`,
+            formatDate(batch.createdAt),
+          ]);
+        }
+
+        console.log(table.toString());
+        console.log(chalk.gray(`\n共 ${batches.length} 条批量记录，显示前 ${displayBatches.length} 条`));
+        return;
+      }
+
       let tasks = [...history.tasks];
 
       if (options.status) {

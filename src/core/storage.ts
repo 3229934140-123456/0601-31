@@ -48,6 +48,14 @@ export function addTask(task: TaskResult, cwd: string = process.cwd()): void {
   } else {
     history.tasks.push(task);
   }
+
+  for (const batch of history.batches) {
+    const taskIndex = batch.tasks.findIndex(t => t.id === task.id);
+    if (taskIndex >= 0) {
+      batch.tasks[taskIndex] = task;
+    }
+  }
+
   saveHistory(history, cwd);
 }
 
@@ -69,7 +77,20 @@ export function addBatch(batch: BatchJob, cwd: string = process.cwd()): void {
 
 export function getBatch(batchId: string, cwd: string = process.cwd()): BatchJob | undefined {
   const history = loadHistory(cwd);
-  return history.batches.find(b => b.id === batchId);
+  const batch = history.batches.find(b => b.id === batchId);
+  if (!batch) return undefined;
+
+  const updatedTasks = batch.tasks.map(task => {
+    const latest = history.tasks.find(t => t.id === task.id);
+    return latest || task;
+  });
+
+  return {
+    ...batch,
+    tasks: updatedTasks,
+    completedTasks: updatedTasks.filter(t => t.status === 'success').length,
+    failedTasks: updatedTasks.filter(t => t.status === 'failed').length,
+  };
 }
 
 export function addHistoryRecord(record: HistoryRecord, cwd: string = process.cwd()): void {

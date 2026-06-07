@@ -3,7 +3,7 @@ const inquirer = require('inquirer');
 const chalk = require('chalk');
 const Table = require('cli-table3');
 import { loadTemplates, saveTemplate, getTemplate, deleteTemplate } from '../core/storage';
-import { createTemplate, validateVariables, renderTemplate } from '../core/template';
+import { createTemplate, validateVariables, renderTemplate, refreshTemplateVariables } from '../core/template';
 import { PromptTemplate, TemplateVariable } from '../types';
 import { truncateText, formatDate } from '../utils';
 
@@ -248,8 +248,20 @@ export function registerPromptCommand(program: Command): void {
         updatedAt: new Date().toISOString(),
       };
 
-      saveTemplate(updatedTemplate);
+      const refreshedTemplate = refreshTemplateVariables(updatedTemplate);
+      saveTemplate(refreshedTemplate);
       console.log(chalk.green('✓ 模板更新成功'));
+      if (refreshedTemplate.variables.length !== template.variables.length) {
+        console.log(chalk.cyan(`变量已更新: ${template.variables.length} → ${refreshedTemplate.variables.length} 个变量`));
+        const added = refreshedTemplate.variables.filter(v => !template.variables.find(tv => tv.name === v.name));
+        const removed = template.variables.filter(v => !refreshedTemplate.variables.find(rv => rv.name === v.name));
+        if (added.length > 0) {
+          console.log(chalk.green(`  新增: ${added.map(v => v.name).join(', ')}`));
+        }
+        if (removed.length > 0) {
+          console.log(chalk.yellow(`  移除: ${removed.map(v => v.name).join(', ')}`));
+        }
+      }
     });
 
   promptCmd
