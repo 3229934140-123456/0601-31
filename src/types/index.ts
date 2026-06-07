@@ -64,6 +64,8 @@ export interface TaskResult {
   reviewed?: boolean;
   reviewStatus?: 'approved' | 'rejected' | 'pending';
   reviewNotes?: string;
+  reviewComment?: string;
+  reviewedAt?: string;
   qualityCheck?: QualityCheckResult;
   versions?: TaskResultVersion[];
   sourceFile?: string;
@@ -86,6 +88,7 @@ export interface QualityCheckResult {
   toneLabel: string;
   readabilityScore: number;
   overall: 'pass' | 'warning' | 'fail';
+  issues?: string[];
 }
 
 export interface BatchJob {

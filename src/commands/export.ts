@@ -6,7 +6,193 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { loadHistory, getBatch, ensureOutputDir } from '../core/storage';
 import { formatCost } from '../core/cost';
-import { formatDate } from '../utils';
+import { formatDate, generateId } from '../utils';
+
+interface ExportField {
+  id: string;
+  label: string;
+  category: string;
+  default?: boolean;
+}
+
+const EXPORT_FIELDS: ExportField[] = [
+  { id: 'id', label: '任务ID', category: '基础', default: true },
+  { id: 'taskName', label: '任务名称', category: '基础', default: true },
+  { id: 'templateName', label: '模板名称', category: '基础', default: true },
+  { id: 'sourceFile', label: '来源文件', category: '基础', default: true },
+  { id: 'status', label: '执行状态', category: '基础', default: true },
+  { id: 'model', label: '模型', category: '基础', default: false },
+  { id: 'createdAt', label: '创建时间', category: '基础', default: true },
+  { id: 'completedAt', label: '完成时间', category: '基础', default: false },
+
+  { id: 'input', label: '输入变量', category: '输入', default: false },
+  { id: 'output', label: '输出内容', category: '输出', default: true },
+
+  { id: 'reviewStatus', label: '审核状态', category: '审核', default: true },
+  { id: 'reviewComment', label: '审核备注', category: '审核', default: true },
+
+  { id: 'qc_overall', label: '质检结果', category: '质检', default: false },
+  { id: 'qc_sensitiveWords', label: '敏感词检测', category: '质检', default: false },
+  { id: 'qc_tone', label: '语气分析', category: '质检', default: false },
+  { id: 'qc_readability', label: '可读性评分', category: '质检', default: false },
+
+  { id: 'inputTokens', label: '输入Token', category: '成本', default: false },
+  { id: 'outputTokens', label: '输出Token', category: '成本', default: false },
+  { id: 'totalTokens', label: '总Token', category: '成本', default: false },
+  { id: 'cost', label: '成本', category: '成本', default: true },
+];
+
+function getDefaultFieldIds(): string[] {
+  return EXPORT_FIELDS.filter(f => f.default).map(f => f.id);
+}
+
+function buildRecords(tasks: any[], fieldIds: string[]): any[] {
+  return tasks.map(task => {
+    const record: any = {};
+    for (const fieldId of fieldIds) {
+      switch (fieldId) {
+        case 'id':
+          record.id = task.id;
+          break;
+        case 'taskName':
+          record.taskName = task.taskName;
+          break;
+        case 'templateName':
+          record.templateName = task.templateName;
+          break;
+        case 'sourceFile':
+          record.sourceFile = task.sourceFile ? path.basename(task.sourceFile) : '';
+          break;
+        case 'status':
+          record.status = task.status;
+          break;
+        case 'model':
+          record.model = task.model;
+          break;
+        case 'createdAt':
+          record.createdAt = task.createdAt;
+          break;
+        case 'completedAt':
+          record.completedAt = task.completedAt || '';
+          break;
+        case 'input':
+          record.input = task.input ? JSON.stringify(task.input) : '';
+          break;
+        case 'output':
+          record.output = task.output || '';
+          break;
+        case 'reviewStatus':
+          record.reviewStatus = task.reviewStatus || 'pending';
+          break;
+        case 'reviewComment':
+          record.reviewComment = task.reviewComment || '';
+          break;
+        case 'qc_overall':
+          record.qc_overall = task.qualityCheck?.overall || '';
+          break;
+        case 'qc_sensitiveWords':
+          record.qc_sensitiveWords = task.qualityCheck?.sensitiveWords?.join('、') || '';
+          break;
+        case 'qc_tone':
+          record.qc_tone = task.qualityCheck?.toneLabel || '';
+          break;
+        case 'qc_readability':
+          record.qc_readability = task.qualityCheck?.readabilityScore || '';
+          break;
+        case 'inputTokens':
+          record.inputTokens = task.tokens?.input || 0;
+          break;
+        case 'outputTokens':
+          record.outputTokens = task.tokens?.output || 0;
+          break;
+        case 'totalTokens':
+          record.totalTokens = task.tokens?.total || 0;
+          break;
+        case 'cost':
+          record.cost = task.cost?.toFixed?.(6) ?? task.cost;
+          break;
+      }
+    }
+    return record;
+  });
+}
+
+function fieldLabel(id: string): string {
+  const f = EXPORT_FIELDS.find(f => f.id === id);
+  return f ? f.label : id;
+}
+
+function generateOutputFileName(prefix: string, batchId: string | undefined, ext: string): string {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').substr(0, 19);
+  const batchPart = batchId ? `_${batchId}` : '';
+  return `${prefix}${batchPart}_${timestamp}.${ext}`;
+}
+
+function printExportPreview(tasks: any[], fieldIds: string[]): void {
+  const total = tasks.length;
+  const successCount = tasks.filter(t => t.status === 'success').length;
+  const failedCount = tasks.filter(t => t.status === 'failed').length;
+  const approvedCount = tasks.filter(t => t.reviewStatus === 'approved').length;
+  const rejectedCount = tasks.filter(t => t.reviewStatus === 'rejected').length;
+  const pendingCount = total - approvedCount - rejectedCount;
+  const totalCost = tasks.reduce((sum, t) => sum + (t.cost || 0), 0);
+
+  console.log(chalk.cyan('\n📋 导出预览'));
+  console.log(chalk.cyan('───────────────────────────'));
+  console.log(`导出条数: ${chalk.bold(total)} 条`);
+  console.log(`执行状态: ${chalk.green(`成功 ${successCount}`)} / ${chalk.red(`失败 ${failedCount}`)}`);
+  console.log(`审核状态: ${chalk.green(`已通过 ${approvedCount}`)} / ${chalk.red(`已拒绝 ${rejectedCount}`)} / ${chalk.yellow(`待审核 ${pendingCount}`)}`);
+  console.log(`总成本: ${formatCost(totalCost)}`);
+  console.log(`导出字段: ${fieldIds.length} 个 (${fieldIds.map(fieldLabel).join(', ')})`);
+  console.log('');
+}
+
+async function selectFieldsInteractive(defaultFields: string[]): Promise<string[]> {
+  const categories = [...new Set(EXPORT_FIELDS.map(f => f.category))];
+
+  const choices: any[] = categories.map(cat => ({
+    name: chalk.cyan(`[${cat}] 全选`),
+    value: `category:${cat}`,
+  }));
+
+  choices.push(new inquirer.Separator());
+
+  for (const field of EXPORT_FIELDS) {
+    choices.push({
+      name: `  ${fieldLabel(field.id)}`,
+      value: field.id,
+      checked: defaultFields.includes(field.id),
+    });
+  }
+
+  const answers = await inquirer.prompt([
+    {
+      type: 'checkbox',
+      name: 'fields',
+      message: '选择要导出的字段:',
+      choices,
+      validate: (selected: string[]) => {
+        if (selected.length === 0) return '至少选择一个字段';
+        const realFields = selected.filter(s => !s.startsWith('category:'));
+        if (realFields.length === 0) return '至少选择一个具体字段';
+        return true;
+      },
+    },
+  ]);
+
+  let selected = [...answers.fields];
+
+  for (const sel of answers.fields) {
+    if (sel.startsWith('category:')) {
+      const cat = sel.replace('category:', '');
+      const catFields = EXPORT_FIELDS.filter(f => f.category === cat).map(f => f.id);
+      selected = [...new Set([...selected, ...catFields])];
+    }
+  }
+
+  selected = selected.filter(s => !s.startsWith('category:'));
+  return selected;
+}
 
 export function registerExportCommand(program: Command): void {
   const exportCmd = program
@@ -18,9 +204,13 @@ export function registerExportCommand(program: Command): void {
     .description('导出为 CSV 格式')
     .option('-b, --batch <batchId>', '导出指定批量任务')
     .option('-o, --output <file>', '输出文件路径')
-    .option('--include-input', '包含输入内容')
-    .option('--include-quality', '包含质检结果')
+    .option('--fields <fields...>', '指定导出字段')
+    .option('--select-fields', '交互式选择导出字段')
     .option('--only-approved', '只导出已审核通过的')
+    .option('--only-pending', '只导出待审核的')
+    .option('--only-success', '只导出执行成功的')
+    .option('--only-failed', '只导出执行失败的')
+    .option('-y, --yes', '非交互模式，直接导出')
     .action(async (options) => {
       const history = loadHistory();
       let tasks = [...history.tasks];
@@ -37,85 +227,82 @@ export function registerExportCommand(program: Command): void {
       if (options.onlyApproved) {
         tasks = tasks.filter(t => t.reviewStatus === 'approved');
       }
+      if (options.onlyPending) {
+        tasks = tasks.filter(t => !t.reviewStatus || t.reviewStatus === 'pending');
+      }
+      if (options.onlySuccess) {
+        tasks = tasks.filter(t => t.status === 'success');
+      }
+      if (options.onlyFailed) {
+        tasks = tasks.filter(t => t.status === 'failed');
+      }
 
       if (tasks.length === 0) {
         console.log(chalk.yellow('没有可导出的任务'));
         return;
       }
 
-      const outputFile = options.output || `./export_${Date.now()}.csv`;
+      let fieldIds: string[];
+      if (options.fields && options.fields.length > 0) {
+        fieldIds = options.fields.filter((f: string) =>
+          EXPORT_FIELDS.some(ef => ef.id === f)
+        );
+        if (fieldIds.length === 0) {
+          console.log(chalk.red('✗ 没有有效的导出字段'));
+          return;
+        }
+      } else if (options.selectFields) {
+        fieldIds = await selectFieldsInteractive(getDefaultFieldIds());
+      } else {
+        fieldIds = getDefaultFieldIds();
+      }
+
+      printExportPreview(tasks, fieldIds);
+
+      if (!options.yes && !options.selectFields) {
+        const confirm = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'confirmed',
+            message: '确认导出？',
+            default: true,
+          },
+        ]);
+        if (!confirm.confirmed) {
+          console.log(chalk.gray('已取消导出'));
+          return;
+        }
+      }
+
+      const outputFile = options.output || generateOutputFileName('export', options.batch, 'csv');
 
       const spinner = ora('正在导出...').start();
 
       try {
         const createCsvWriter = require('csv-writer').createObjectCsvWriter;
 
-        const headers: any[] = [
-          { id: 'id', title: '任务ID' },
-          { id: 'taskName', title: '任务名称' },
-          { id: 'templateName', title: '模板名称' },
-          { id: 'status', title: '状态' },
-          { id: 'model', title: '模型' },
-          { id: 'inputTokens', title: '输入Token' },
-          { id: 'outputTokens', title: '输出Token' },
-          { id: 'totalTokens', title: '总Token' },
-          { id: 'cost', title: '成本' },
-          { id: 'createdAt', title: '创建时间' },
-          { id: 'completedAt', title: '完成时间' },
-          { id: 'reviewStatus', title: '审核状态' },
-          { id: 'output', title: '输出内容' },
-        ];
-
-        if (options.includeInput) {
-          headers.splice(3, 0, { id: 'input', title: '输入内容' });
-        }
-
-        if (options.includeQuality) {
-          headers.push(
-            { id: 'qc_overall', title: '质检结果' },
-            { id: 'qc_sensitiveWords', title: '敏感词' },
-            { id: 'qc_tone', title: '语气' },
-            { id: 'qc_readability', title: '可读性' }
-          );
-        }
+        const headers = fieldIds.map((id: string) => ({
+          id,
+          title: fieldLabel(id),
+        }));
 
         const csvWriter = createCsvWriter({
           path: outputFile,
           header: headers,
         });
 
-        const records = tasks.map(task => {
-          const record: any = {
-            id: task.id,
-            taskName: task.taskName,
-            templateName: task.templateName,
-            status: task.status,
-            model: task.model,
-            inputTokens: task.tokens.input,
-            outputTokens: task.tokens.output,
-            totalTokens: task.tokens.total,
-            cost: task.cost.toFixed(6),
-            createdAt: task.createdAt,
-            completedAt: task.completedAt || '',
-            reviewStatus: task.reviewStatus || '',
-            output: task.output.replace(/\n/g, '\\n'),
-          };
-
-          if (options.includeInput) {
-            record.input = JSON.stringify(task.input).replace(/\n/g, '\\n');
+        const records = buildRecords(tasks, fieldIds);
+        const safeRecords = records.map(r => {
+          const safe: any = {};
+          for (const key of Object.keys(r)) {
+            safe[key] = typeof r[key] === 'string'
+              ? r[key].replace(/\n/g, '\\n')
+              : r[key];
           }
-
-          if (options.includeQuality && task.qualityCheck) {
-            record.qc_overall = task.qualityCheck.overall;
-            record.qc_sensitiveWords = task.qualityCheck.sensitiveWords.join('、');
-            record.qc_tone = task.qualityCheck.toneLabel;
-            record.qc_readability = task.qualityCheck.readabilityScore;
-          }
-
-          return record;
+          return safe;
         });
 
-        await csvWriter.writeRecords(records);
+        await csvWriter.writeRecords(safeRecords);
 
         spinner.succeed(`导出成功: ${outputFile}`);
         console.log(chalk.gray(`共导出 ${tasks.length} 条记录`));
@@ -131,10 +318,14 @@ export function registerExportCommand(program: Command): void {
     .description('导出为 Excel 格式')
     .option('-b, --batch <batchId>', '导出指定批量任务')
     .option('-o, --output <file>', '输出文件路径')
-    .option('--include-input', '包含输入内容')
-    .option('--include-quality', '包含质检结果')
+    .option('--fields <fields...>', '指定导出字段')
+    .option('--select-fields', '交互式选择导出字段')
     .option('--only-approved', '只导出已审核通过的')
-    .action((options) => {
+    .option('--only-pending', '只导出待审核的')
+    .option('--only-success', '只导出执行成功的')
+    .option('--only-failed', '只导出执行失败的')
+    .option('-y, --yes', '非交互模式，直接导出')
+    .action(async (options) => {
       const history = loadHistory();
       let tasks = [...history.tasks];
 
@@ -150,50 +341,69 @@ export function registerExportCommand(program: Command): void {
       if (options.onlyApproved) {
         tasks = tasks.filter(t => t.reviewStatus === 'approved');
       }
+      if (options.onlyPending) {
+        tasks = tasks.filter(t => !t.reviewStatus || t.reviewStatus === 'pending');
+      }
+      if (options.onlySuccess) {
+        tasks = tasks.filter(t => t.status === 'success');
+      }
+      if (options.onlyFailed) {
+        tasks = tasks.filter(t => t.status === 'failed');
+      }
 
       if (tasks.length === 0) {
         console.log(chalk.yellow('没有可导出的任务'));
         return;
       }
 
-      const outputFile = options.output || `./export_${Date.now()}.xlsx`;
+      let fieldIds: string[];
+      if (options.fields && options.fields.length > 0) {
+        fieldIds = options.fields.filter((f: string) =>
+          EXPORT_FIELDS.some(ef => ef.id === f)
+        );
+        if (fieldIds.length === 0) {
+          console.log(chalk.red('✗ 没有有效的导出字段'));
+          return;
+        }
+      } else if (options.selectFields) {
+        fieldIds = await selectFieldsInteractive(getDefaultFieldIds());
+      } else {
+        fieldIds = getDefaultFieldIds();
+      }
+
+      printExportPreview(tasks, fieldIds);
+
+      if (!options.yes && !options.selectFields) {
+        const confirm = await inquirer.prompt([
+          {
+            type: 'confirm',
+            name: 'confirmed',
+            message: '确认导出？',
+            default: true,
+          },
+        ]);
+        if (!confirm.confirmed) {
+          console.log(chalk.gray('已取消导出'));
+          return;
+        }
+      }
+
+      const outputFile = options.output || generateOutputFileName('export', options.batch, 'xlsx');
       const spinner = ora('正在导出 Excel...').start();
 
       try {
         const XLSX = require('xlsx');
 
-        const data = tasks.map(task => {
-          const row: any = {
-            '任务ID': task.id,
-            '任务名称': task.taskName,
-            '模板名称': task.templateName,
-            '状态': task.status,
-            '模型': task.model,
-            '输入Token': task.tokens.input,
-            '输出Token': task.tokens.output,
-            '总Token': task.tokens.total,
-            '成本': task.cost,
-            '创建时间': task.createdAt,
-            '完成时间': task.completedAt || '',
-            '审核状态': task.reviewStatus || '',
-            '输出内容': task.output,
-          };
-
-          if (options.includeInput) {
-            row['输入内容'] = JSON.stringify(task.input);
+        const records = buildRecords(tasks, fieldIds);
+        const labeled = records.map(r => {
+          const out: any = {};
+          for (const key of Object.keys(r)) {
+            out[fieldLabel(key)] = r[key];
           }
-
-          if (options.includeQuality && task.qualityCheck) {
-            row['质检结果'] = task.qualityCheck.overall;
-            row['敏感词'] = task.qualityCheck.sensitiveWords.join('、');
-            row['语气'] = task.qualityCheck.toneLabel;
-            row['可读性'] = task.qualityCheck.readabilityScore;
-          }
-
-          return row;
+          return out;
         });
 
-        const ws = XLSX.utils.json_to_sheet(data);
+        const ws = XLSX.utils.json_to_sheet(labeled);
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, '任务结果');
 
@@ -216,6 +426,7 @@ export function registerExportCommand(program: Command): void {
     .option('--separator <separator>', '分隔符', '\\n\\n---\\n\\n')
     .option('--add-filename', '添加文件名作为标题')
     .option('--only-success', '只合并成功的任务')
+    .option('--only-approved', '只合并已审核通过的')
     .action((options) => {
       let tasks: any[] = [];
 
@@ -231,13 +442,16 @@ export function registerExportCommand(program: Command): void {
       if (options.onlySuccess) {
         tasks = tasks.filter(t => t.status === 'success');
       }
+      if (options.onlyApproved) {
+        tasks = tasks.filter(t => t.reviewStatus === 'approved');
+      }
 
       if (tasks.length === 0) {
         console.log(chalk.yellow('没有可合并的任务'));
         return;
       }
 
-      const outputFile = options.output || `./merged_output_${Date.now()}.txt`;
+      const outputFile = options.output || generateOutputFileName('merged', options.batch, 'txt');
       const separator = options.separator.replace(/\\n/g, '\n');
 
       const spinner = ora('正在合并...').start();
@@ -298,7 +512,7 @@ export function registerExportCommand(program: Command): void {
       const failedCount = tasks.filter(t => t.status === 'failed').length;
       const totalCost = tasks.reduce((sum, t) => sum + t.cost, 0);
       const totalTokens = tasks.reduce((sum, t) => sum + t.tokens.total, 0);
-      const reviewedCount = tasks.filter(t => t.reviewed).length;
+      const reviewedCount = tasks.filter(t => t.reviewStatus && t.reviewStatus !== 'pending').length;
       const approvedCount = tasks.filter(t => t.reviewStatus === 'approved').length;
       const rejectedCount = tasks.filter(t => t.reviewStatus === 'rejected').length;
 
@@ -306,7 +520,7 @@ export function registerExportCommand(program: Command): void {
       const qualityWarning = tasks.filter(t => t.qualityCheck?.overall === 'warning').length;
       const qualityFailed = tasks.filter(t => t.qualityCheck?.overall === 'fail').length;
 
-      const outputFile = options.output || `./report_${Date.now()}.${options.format}`;
+      const outputFile = options.output || generateOutputFileName('report', options.batch, options.format);
 
       let reportContent = '';
 

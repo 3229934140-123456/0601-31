@@ -2,6 +2,7 @@ import { Command } from 'commander';
 const inquirer = require('inquirer');
 const chalk = require('chalk');
 const ora = require('ora');
+import * as path from 'path';
 import { loadConfig } from '../core/config';
 import { getTask, addTask, getBatch, loadHistory } from '../core/storage';
 import { callAIWithRetry } from '../core/ai-client';
@@ -145,8 +146,9 @@ export function registerReviewCommand(program: Command): void {
     .command('batch <batchId>')
     .description('批量审核任务结果')
     .option('--only-pending', '只审核未审核的任务')
-    .option('--only-failed', '只显示失败的任务')
-    .option('--auto-approve-pass', '自动批准质检通过的任务')
+    .option('--auto-mode', '按质检分组自动模式')
+    .option('--skip-failed', '跳过失败任务（默认跳过）')
+    .option('--include-failed', '包含失败任务')
     .action(async (batchId, options) => {
       const config = loadConfig();
       const batch = getBatch(batchId);
@@ -159,98 +161,344 @@ export function registerReviewCommand(program: Command): void {
       let tasks = [...batch.tasks];
 
       if (options.onlyPending) {
-        tasks = tasks.filter(t => !t.reviewed && t.status === 'success');
-      }
-      if (options.onlyFailed) {
-        tasks = tasks.filter(t => t.status === 'failed');
+        tasks = tasks.filter(t => !t.reviewStatus || t.reviewStatus === 'pending');
       }
 
-      if (tasks.length === 0) {
-        console.log(chalk.yellow('没有需要审核的任务'));
-        return;
-      }
+      const successTasks = tasks.filter(t => t.status === 'success');
+      const failedTasks = tasks.filter(t => t.status === 'failed');
 
-      console.log(chalk.bold.cyan(`\n📋 批量审核: ${batch.name}`));
-      console.log(chalk.cyan(`待审核任务: ${tasks.length}\n`));
-
-      let approved = 0;
-      let rejected = 0;
-
-      for (let i = 0; i < tasks.length; i++) {
-        const task = tasks[i];
-        console.log(chalk.gray(`--- [${i + 1}/${tasks.length}] ${task.taskName} ---`));
-
-        if (task.status !== 'success') {
-          console.log(chalk.red(`任务失败: ${task.error}`));
-          continue;
-        }
-
+      for (const task of successTasks) {
         if (!task.qualityCheck) {
           task.qualityCheck = checkQuality(task.output, config);
           addTask(task);
         }
+      }
 
-        if (options.autoApprovePass && task.qualityCheck?.overall === 'pass') {
-          task.reviewed = true;
-          task.reviewStatus = 'approved';
-          task.reviewNotes = '自动审批通过';
-          addTask(task);
-          approved++;
-          console.log(chalk.green('  ✓ 自动批准'));
-          continue;
+      const passTasks = successTasks.filter(t => t.qualityCheck?.overall === 'pass');
+      const warningTasks = successTasks.filter(t => t.qualityCheck?.overall === 'warning');
+      const failQcTasks = successTasks.filter(t => t.qualityCheck?.overall === 'fail');
+
+      console.log(chalk.bold.cyan(`\n📋 批量审核: ${batch.name}\n`));
+      console.log(chalk.cyan('【任务分组统计'));
+      console.log(chalk.green(`  质检通过: ${passTasks.length} 条`));
+      console.log(chalk.yellow(`  质检警告: ${warningTasks.length} 条`));
+      console.log(chalk.red(`  质检失败: ${failQcTasks.length} 条`));
+      console.log(chalk.gray(`  执行失败: ${failedTasks.length} 条`));
+      console.log('');
+
+      let approved = 0;
+      let rejected = 0;
+      let skipped = 0;
+
+      if (passTasks.length > 0) {
+        console.log(chalk.bold.green(`🔹 质检通过 (${passTasks.length} 条)`));
+
+        let autoApprove = false;
+        if (options.autoMode) {
+          autoApprove = true;
+        } else {
+          const confirm = await inquirer.prompt([
+            {
+              type: 'confirm',
+              name: 'autoApprove',
+              message: `质检通过的 ${passTasks.length} 条任务，是否全部批准？`,
+              default: true,
+            },
+          ]);
+          autoApprove = confirm.autoApprove;
         }
 
-        console.log(`  质检: ${formatQualityOverall(task.qualityCheck)}`);
-        console.log(`  预览: ${task.output.substring(0, 100)}...`);
+        if (autoApprove) {
+          const commentAnswer = await inquirer.prompt([
+            {
+              type: 'input',
+              name: 'comment',
+              message: '审核备注（可留空）:',
+              default: '质检通过，批量批准',
+            },
+          ]);
 
-        const action = await inquirer.prompt([
-          {
-            type: 'list',
-            name: 'choice',
-            message: '操作:',
-            choices: [
-              { name: '批准', value: 'approve' },
-              { name: '拒绝', value: 'reject' },
-              { name: '查看详情', value: 'view' },
-              { name: '跳过', value: 'skip' },
-              { name: '全部批准并退出', value: 'approve-all' },
-              { name: '退出', value: 'exit' },
-            ],
-          },
-        ]);
-
-        if (action.choice === 'approve') {
-          task.reviewed = true;
-          task.reviewStatus = 'approved';
-          addTask(task);
-          approved++;
-        } else if (action.choice === 'reject') {
-          task.reviewed = true;
-          task.reviewStatus = 'rejected';
-          addTask(task);
-          rejected++;
-        } else if (action.choice === 'view') {
-          console.log('\n' + task.output + '\n');
-          i--;
-        } else if (action.choice === 'approve-all') {
-          for (let j = i; j < tasks.length; j++) {
-            if (tasks[j].status === 'success') {
-              tasks[j].reviewed = true;
-              tasks[j].reviewStatus = 'approved';
-              addTask(tasks[j]);
-              approved++;
-            }
+          for (const task of passTasks) {
+            if (task.reviewStatus === 'approved') continue;
+            task.reviewed = true;
+            task.reviewStatus = 'approved';
+            task.reviewComment = commentAnswer.comment;
+            task.reviewedAt = new Date().toISOString();
+            addTask(task);
+            approved++;
           }
-          break;
-        } else if (action.choice === 'exit') {
-          break;
+          console.log(chalk.green(`  ✓ 已批准 ${approved} 条质检通过的任务\n`));
+        } else {
+          console.log(chalk.gray('  跳过质检通过的任务，逐条处理\n'));
+          skipped += passTasks.length;
         }
       }
 
-      console.log(chalk.cyan('\n--- 审核统计 ---'));
+      if (warningTasks.length > 0) {
+        console.log(chalk.bold.yellow(`� 质检警告 (${warningTasks.length} 条)`));
+        console.log(chalk.yellow('  以下任务有轻微问题，建议逐条查看\n'));
+
+        let batchAction = 'review';
+        if (warningTasks.length > 1) {
+          const choice = await inquirer.prompt([
+            {
+              type: 'list',
+              name: 'action',
+              message: '如何处理质检警告的任务？',
+              choices: [
+                { name: '逐条审核（推荐）', value: 'review' },
+                { name: '全部批准', value: 'approve-all' },
+                { name: '全部跳过', value: 'skip-all' },
+              ],
+            },
+          ]);
+          batchAction = choice.action;
+        }
+
+        if (batchAction === 'approve-all') {
+          const commentAnswer = await inquirer.prompt([
+            {
+              type: 'input',
+              name: 'comment',
+              message: '审核备注（可留空）:',
+              default: '质检警告，人工复核通过',
+            },
+          ]);
+
+          for (const task of warningTasks) {
+            if (task.reviewStatus === 'approved') continue;
+            task.reviewed = true;
+            task.reviewStatus = 'approved';
+            task.reviewComment = commentAnswer.comment;
+            task.reviewedAt = new Date().toISOString();
+            addTask(task);
+            approved++;
+          }
+          console.log(chalk.green(`  ✓ 已批准 ${warningTasks.length} 条质检警告的任务\n`));
+        } else if (batchAction === 'skip-all') {
+          skipped += warningTasks.length;
+          console.log(chalk.gray('  已跳过质检警告的任务\n'));
+        } else {
+          for (let i = 0; i < warningTasks.length; i++) {
+            const task = warningTasks[i];
+            console.log(chalk.gray(`--- [${i + 1}/${warningTasks.length}] ${task.sourceFile ? path.basename(task.sourceFile) : task.taskName} ---`));
+
+            if (task.qualityCheck) {
+              console.log(chalk.yellow(`  质检: ${formatQualityOverall(task.qualityCheck)}`));
+              if (task.qualityCheck.issues && task.qualityCheck.issues.length > 0) {
+                console.log(chalk.yellow(`  问题: ${task.qualityCheck.issues.slice(0, 3).join('、')}`));
+              }
+            }
+            console.log(`  预览: ${task.output.substring(0, 150)}...`);
+
+            const action = await inquirer.prompt([
+              {
+                type: 'list',
+                name: 'choice',
+                message: '操作:',
+                choices: [
+                  { name: '批准', value: 'approve' },
+                  { name: '拒绝', value: 'reject' },
+                  { name: '查看全文', value: 'view' },
+                  { name: '跳过', value: 'skip' },
+                  { name: '剩余全部批准', value: 'approve-rest' },
+                  { name: '退出', value: 'exit' },
+                ],
+              },
+            ]);
+
+            if (action.choice === 'approve') {
+              const commentAnswer = await inquirer.prompt([
+                {
+                  type: 'input',
+                  name: 'comment',
+                  message: '审核备注（可留空）:',
+                },
+              ]);
+              task.reviewed = true;
+              task.reviewStatus = 'approved';
+              task.reviewComment = commentAnswer.comment;
+              task.reviewedAt = new Date().toISOString();
+              addTask(task);
+              approved++;
+            } else if (action.choice === 'reject') {
+              const commentAnswer = await inquirer.prompt([
+                {
+                  type: 'input',
+                  name: 'comment',
+                  message: '拒绝原因:',
+                  default: '',
+                },
+              ]);
+              task.reviewed = true;
+              task.reviewStatus = 'rejected';
+              task.reviewComment = commentAnswer.comment;
+              task.reviewedAt = new Date().toISOString();
+              addTask(task);
+              rejected++;
+            } else if (action.choice === 'view') {
+              console.log('\n' + task.output + '\n');
+              i--;
+            } else if (action.choice === 'skip') {
+              skipped++;
+            } else if (action.choice === 'approve-rest') {
+              for (let j = i; j < warningTasks.length; j++) {
+                const t = warningTasks[j];
+                if (t.reviewStatus === 'approved') continue;
+                t.reviewed = true;
+                t.reviewStatus = 'approved';
+                t.reviewComment = '批量批准';
+                t.reviewedAt = new Date().toISOString();
+                addTask(t);
+                approved++;
+              }
+              break;
+            } else if (action.choice === 'exit') {
+              break;
+            }
+          }
+        }
+      }
+
+      if (failQcTasks.length > 0) {
+        console.log(chalk.bold.red(`🔺 质检失败 (${failQcTasks.length} 条)`));
+
+        if (options.includeFailed) {
+          console.log(chalk.red('  以下任务质检未通过，建议拒绝处理\n'));
+
+          const choice = await inquirer.prompt([
+            {
+              type: 'list',
+              name: 'action',
+              message: '如何处理质检失败的任务？',
+              choices: [
+                { name: '逐条查看', value: 'review' },
+                { name: '全部拒绝', value: 'reject-all' },
+                { name: '全部跳过', value: 'skip-all' },
+              ],
+            },
+          ]);
+
+          if (choice.action === 'reject-all') {
+            const commentAnswer = await inquirer.prompt([
+              {
+                type: 'input',
+                name: 'comment',
+                message: '拒绝原因:',
+                default: '质检失败',
+              },
+            ]);
+
+            for (const task of failQcTasks) {
+              if (task.reviewStatus === 'rejected') continue;
+              task.reviewed = true;
+              task.reviewStatus = 'rejected';
+              task.reviewComment = commentAnswer.comment;
+              task.reviewedAt = new Date().toISOString();
+              addTask(task);
+              rejected++;
+            }
+            console.log(chalk.red(`  ✗ 已拒绝 ${failQcTasks.length} 条质检失败的任务\n`));
+          } else if (choice.action === 'skip-all') {
+            skipped += failQcTasks.length;
+            console.log(chalk.gray('  已跳过质检失败的任务\n'));
+          } else {
+            for (let i = 0; i < failQcTasks.length; i++) {
+              const task = failQcTasks[i];
+              console.log(chalk.gray(`--- [${i + 1}/${failQcTasks.length}] ${task.sourceFile ? path.basename(task.sourceFile) : task.taskName} ---`));
+
+              if (task.qualityCheck) {
+                console.log(chalk.red(`  质检: ${formatQualityOverall(task.qualityCheck)}`));
+                if (task.qualityCheck.issues) {
+                  console.log(chalk.red(`  问题: ${task.qualityCheck.issues.join('、')}`));
+                }
+              }
+              console.log(`  预览: ${task.output.substring(0, 150)}...`);
+
+              const action = await inquirer.prompt([
+                {
+                  type: 'list',
+                  name: 'choice',
+                  message: '操作:',
+                  choices: [
+                    { name: '批准（不推荐）', value: 'approve' },
+                    { name: '拒绝', value: 'reject' },
+                    { name: '查看全文', value: 'view' },
+                    { name: '跳过', value: 'skip' },
+                    { name: '剩余全部拒绝', value: 'reject-rest' },
+                    { name: '退出', value: 'exit' },
+                  ],
+                },
+              ]);
+
+              if (action.choice === 'approve') {
+                const commentAnswer = await inquirer.prompt([
+                  {
+                    type: 'input',
+                    name: 'comment',
+                    message: '审核备注（可留空）:',
+                  },
+                ]);
+                task.reviewed = true;
+                task.reviewStatus = 'approved';
+                task.reviewComment = commentAnswer.comment;
+                task.reviewedAt = new Date().toISOString();
+                addTask(task);
+                approved++;
+              } else if (action.choice === 'reject') {
+                const commentAnswer = await inquirer.prompt([
+                  {
+                    type: 'input',
+                    name: 'comment',
+                    message: '拒绝原因:',
+                    default: '',
+                  },
+                ]);
+                task.reviewed = true;
+                task.reviewStatus = 'rejected';
+                task.reviewComment = commentAnswer.comment;
+                task.reviewedAt = new Date().toISOString();
+                addTask(task);
+                rejected++;
+              } else if (action.choice === 'view') {
+                console.log('\n' + task.output + '\n');
+                i--;
+              } else if (action.choice === 'skip') {
+                skipped++;
+              } else if (action.choice === 'reject-rest') {
+                for (let j = i; j < failQcTasks.length; j++) {
+                  const t = failQcTasks[j];
+                  if (t.reviewStatus === 'rejected') continue;
+                  t.reviewed = true;
+                  t.reviewStatus = 'rejected';
+                  t.reviewComment = '批量拒绝';
+                  t.reviewedAt = new Date().toISOString();
+                  addTask(t);
+                  rejected++;
+                }
+                break;
+              } else if (action.choice === 'exit') {
+                break;
+              }
+            }
+          }
+        } else {
+          console.log(chalk.gray('  （默认跳过，使用 --include-failed 可包含）\n'));
+          skipped += failQcTasks.length;
+        }
+      }
+
+      if (failedTasks.length > 0) {
+        console.log(chalk.bold.gray(`⏹  执行失败 (${failedTasks.length} 条)`));
+        console.log(chalk.gray('  执行失败的任务暂不审核，可使用 retry-failed 重试\n'));
+        skipped += failedTasks.length;
+      }
+
+      console.log(chalk.cyan('\n─── 审核统计 ───'));
       console.log(chalk.green(`批准: ${approved}`));
       console.log(chalk.red(`拒绝: ${rejected}`));
-      console.log(chalk.gray(`共 ${tasks.length} 个任务`));
+      console.log(chalk.gray(`跳过: ${skipped}`));
+      console.log(chalk.gray(`总计: ${tasks.length} 个任务`));
       console.log('');
     });
 

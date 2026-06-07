@@ -592,11 +592,30 @@ export function registerBatchCommand(program: Command): void {
   batchCmd
     .command('show <batchId>')
     .description('查看批量任务详情')
-    .action((batchId) => {
+    .option('--only-approved', '只显示已审核通过的')
+    .option('--only-pending', '只显示待审核的')
+    .option('--only-failed', '只显示失败的')
+    .option('--only-warning', '只显示质检警告的')
+    .action((batchId, options) => {
       const batch = getBatch(batchId);
       if (!batch) {
         console.log(chalk.red(`✗ 批量任务不存在: ${batchId}`));
         return;
+      }
+
+      let tasks = [...batch.tasks];
+
+      if (options.onlyApproved) {
+        tasks = tasks.filter(t => t.reviewStatus === 'approved');
+      }
+      if (options.onlyPending) {
+        tasks = tasks.filter(t => !t.reviewStatus || t.reviewStatus === 'pending');
+      }
+      if (options.onlyFailed) {
+        tasks = tasks.filter(t => t.status === 'failed');
+      }
+      if (options.onlyWarning) {
+        tasks = tasks.filter(t => t.qualityCheck?.overall === 'warning');
       }
 
       const statusColors: Record<string, any> = {
@@ -606,8 +625,11 @@ export function registerBatchCommand(program: Command): void {
         failed: chalk.red,
       };
 
-      const totalCost = batch.tasks.reduce((sum, t) => sum + t.cost, 0);
-      const totalTokens = batch.tasks.reduce((sum, t) => sum + t.tokens.total, 0);
+      const totalCost = tasks.reduce((sum, t) => sum + t.cost, 0);
+      const totalTokens = tasks.reduce((sum, t) => sum + t.tokens.total, 0);
+      const approvedCount = tasks.filter(t => t.reviewStatus === 'approved').length;
+      const rejectedCount = tasks.filter(t => t.reviewStatus === 'rejected').length;
+      const pendingReviewCount = tasks.filter(t => !t.reviewStatus || t.reviewStatus === 'pending').length;
 
       console.log(chalk.bold.cyan(`\n📦 批量任务详情: ${batch.name}\n`));
       console.log(chalk.cyan('ID: ') + batch.id);
@@ -617,30 +639,73 @@ export function registerBatchCommand(program: Command): void {
       console.log(chalk.cyan('总任务数: ') + batch.totalTasks);
       console.log(chalk.green('成功: ') + batch.completedTasks);
       console.log(chalk.red('失败: ') + batch.failedTasks);
+
+      let filterDesc = '';
+      if (options.onlyApproved) filterDesc = '已审核通过';
+      else if (options.onlyPending) filterDesc = '待审核';
+      else if (options.onlyFailed) filterDesc = '失败';
+      else if (options.onlyWarning) filterDesc = '质检警告';
+
+      if (filterDesc) {
+        console.log(chalk.cyan(`筛选条件: ${filterDesc}`));
+        console.log(chalk.cyan(`显示任务数: ${tasks.length} / ${batch.totalTasks}`));
+      }
+
+      console.log(chalk.cyan('审核统计: ') +
+        chalk.green(`已通过 ${approvedCount}`) + ' / ' +
+        chalk.red(`已拒绝 ${rejectedCount}`) + ' / ' +
+        chalk.yellow(`待审核 ${pendingReviewCount}`));
       console.log(chalk.cyan('总成本: ') + formatCost(totalCost));
       console.log(chalk.cyan('总 Token: ') + totalTokens);
 
       console.log(chalk.cyan('\n任务列表:'));
       const Table = require('cli-table3');
       const table = new Table({
-        head: [chalk.cyan('#'), chalk.cyan('任务'), chalk.cyan('状态'), chalk.cyan('成本'), chalk.cyan('质检')],
-        colWidths: [5, 30, 10, 10, 10],
+        head: [
+          chalk.cyan('#'),
+          chalk.cyan('来源文件'),
+          chalk.cyan('执行状态'),
+          chalk.cyan('质检'),
+          chalk.cyan('审核'),
+          chalk.cyan('审核备注'),
+          chalk.cyan('成本'),
+        ],
+        colWidths: [5, 28, 10, 8, 10, 24, 10],
       });
 
-      batch.tasks.forEach((task, idx) => {
+      tasks.forEach((task, idx) => {
         const taskStatusColor = task.status === 'success' ? chalk.green :
           task.status === 'failed' ? chalk.red : chalk.yellow;
         const qcStatus = task.qualityCheck ? (
-          task.qualityCheck.overall === 'pass' ? chalk.green('✓') :
-            task.qualityCheck.overall === 'warning' ? chalk.yellow('!') : chalk.red('✗')
+          task.qualityCheck.overall === 'pass' ? chalk.green('通过') :
+            task.qualityCheck.overall === 'warning' ? chalk.yellow('警告') : chalk.red('失败')
         ) : '-';
+
+        let reviewDisplay = '-';
+        if (task.reviewStatus === 'approved') {
+          reviewDisplay = chalk.green('✓ 通过');
+        } else if (task.reviewStatus === 'rejected') {
+          reviewDisplay = chalk.red('✗ 拒绝');
+        } else {
+          reviewDisplay = chalk.yellow('待审核');
+        }
+
+        const reviewComment = task.reviewComment
+          ? task.reviewComment.substr(0, 20) + (task.reviewComment.length > 20 ? '...' : '')
+          : '-';
+
+        const sourceFile = task.sourceFile
+          ? path.basename(task.sourceFile).substr(0, 25)
+          : task.taskName.substr(0, 25);
 
         table.push([
           String(idx + 1),
-          task.taskName.substr(0, 25),
+          sourceFile,
           taskStatusColor(task.status),
-          formatCost(task.cost),
           qcStatus,
+          reviewDisplay,
+          reviewComment,
+          formatCost(task.cost),
         ]);
       });
 
