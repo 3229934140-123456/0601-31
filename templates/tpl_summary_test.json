@@ -1,0 +1,22 @@
+{
+  "id": "tpl_summary_test",
+  "name": "内容摘要模板",
+  "description": "为给定内容生成简洁摘要",
+  "systemPrompt": "你是一名专业的内容编辑，擅长提取文章核心要点，生成精炼的摘要。",
+  "userPrompt": "请为以下内容生成摘要：\n\n{{content}}",
+  "variables": [
+    {
+      "name": "content",
+      "type": "text",
+      "description": "需要摘要的原始内容",
+      "required": true
+    }
+  ],
+  "model": "gpt-3.5-turbo",
+  "temperature": 0.7,
+  "maxTokens": 500,
+  "tone": "professional",
+  "summaryLength": "medium",
+  "createdAt": "2024-01-01T00:00:00.000Z",
+  "updatedAt": "2024-01-01T00:00:00.000Z"
+}
