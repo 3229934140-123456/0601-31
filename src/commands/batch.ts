@@ -655,15 +655,6 @@ export function registerBatchCommand(program: Command): void {
       });
       const unassignedCount = batch.tasks.filter(t => !t.assignee).length;
 
-      console.log(chalk.bold.cyan(`\n📦 批量任务详情: ${batch.name}\n`));
-      console.log(chalk.cyan('ID: ') + batch.id);
-      console.log(chalk.cyan('状态: ') + (statusColors[batch.status]?.(batch.status) || batch.status));
-      console.log(chalk.cyan('模板: ') + batch.templateId);
-      console.log(chalk.cyan('创建时间: ') + formatDate(batch.createdAt));
-      console.log(chalk.cyan('批次总任务数: ') + batch.totalTasks);
-      console.log(chalk.green('批次成功: ') + batch.completedTasks);
-      console.log(chalk.red('批次失败: ') + batch.failedTasks);
-
       let filterParts: string[] = [];
       if (options.onlyApproved) filterParts.push('已审核通过');
       if (options.onlyPending) filterParts.push('待审核');
@@ -671,12 +662,23 @@ export function registerBatchCommand(program: Command): void {
       if (options.onlyWarning) filterParts.push('质检警告');
       if (options.assignee) filterParts.push(`复核人: ${options.assignee}`);
       if (options.noAssignee) filterParts.push('未分配');
+      const hasFilter = filterParts.length > 0;
 
-      if (filterParts.length > 0) {
-        console.log('');
-        console.log(chalk.cyan(`筛选条件: ${filterParts.join(' + ')}`));
-        console.log(chalk.cyan(`筛选结果: ${tasks.length} / ${batch.totalTasks} 条`));
-        console.log(chalk.cyan(`筛选成功: ${successCount}  / 筛选失败: ${failedCount}`));
+      console.log(chalk.bold.cyan(`\n📦 批量任务详情: ${batch.name}\n`));
+      console.log(chalk.cyan('ID: ') + batch.id);
+      console.log(chalk.cyan('状态: ') + (statusColors[batch.status]?.(batch.status) || batch.status));
+      console.log(chalk.cyan('模板: ') + batch.templateId);
+      console.log(chalk.cyan('创建时间: ') + formatDate(batch.createdAt));
+
+      if (hasFilter) {
+        console.log(chalk.yellow(`筛选条件: ${filterParts.join(' + ')}`));
+        console.log(chalk.cyan('任务总数: ') + tasks.length + chalk.gray(` / 批次 ${batch.totalTasks}`));
+        console.log(chalk.green('成功: ') + successCount + chalk.gray(` / 批次 ${batch.completedTasks}`));
+        console.log(chalk.red('失败: ') + failedCount + chalk.gray(` / 批次 ${batch.failedTasks}`));
+      } else {
+        console.log(chalk.cyan('任务总数: ') + batch.totalTasks);
+        console.log(chalk.green('成功: ') + batch.completedTasks);
+        console.log(chalk.red('失败: ') + batch.failedTasks);
       }
 
       console.log('');

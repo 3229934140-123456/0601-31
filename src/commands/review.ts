@@ -4,7 +4,7 @@ const chalk = require('chalk');
 const ora = require('ora');
 import * as path from 'path';
 import { loadConfig } from '../core/config';
-import { getTask, addTask, getBatch, loadHistory, addReviewLog, getReviewLogs } from '../core/storage';
+import { getTask, addTask, getBatch, loadHistory, addReviewLog, getReviewLogs, getTaskBatchId } from '../core/storage';
 import { callAIWithRetry } from '../core/ai-client';
 import { checkQuality, rewriteTonePrompt, summaryPrompt } from '../core/quality';
 import { formatCost } from '../core/cost';
@@ -86,6 +86,8 @@ export function registerReviewCommand(program: Command): void {
         },
       ]);
 
+      const batchId = getTaskBatchId(task.id);
+
       switch (action.choice) {
         case 'approve': {
           task.reviewed = true;
@@ -101,6 +103,7 @@ export function registerReviewCommand(program: Command): void {
           addTask(task);
           logReviewAction({
             taskId: task.id,
+            batchId,
             action: 'approve',
             comment: noteApprove.notes || '批准发布',
             reviewStatusAfter: 'approved',
@@ -123,6 +126,7 @@ export function registerReviewCommand(program: Command): void {
           addTask(task);
           logReviewAction({
             taskId: task.id,
+            batchId,
             action: 'reject',
             comment: noteReject.notes,
             reviewStatusAfter: 'rejected',
@@ -154,6 +158,7 @@ export function registerReviewCommand(program: Command): void {
           addTask(task);
           logReviewAction({
             taskId: task.id,
+            batchId,
             action: 'comment',
             comment: note.notes,
           });
@@ -215,6 +220,24 @@ export function registerReviewCommand(program: Command): void {
       let rejected = 0;
       let skipped = 0;
 
+      const applyReview = (task: TaskResult, status: 'approved' | 'rejected', comment: string, actionType?: 'batch_approve' | 'batch_reject') => {
+        if (task.reviewStatus === status) return;
+        task.reviewed = true;
+        task.reviewStatus = status;
+        task.reviewComment = comment;
+        task.reviewedAt = new Date().toISOString();
+        addTask(task);
+        logReviewAction({
+          taskId: task.id,
+          batchId,
+          action: actionType || (status === 'approved' ? 'approve' : 'reject'),
+          comment,
+          reviewStatusAfter: status,
+        });
+        if (status === 'approved') approved++;
+        else rejected++;
+      };
+
       if (passTasks.length > 0) {
         console.log(chalk.bold.green(`🔹 质检通过 (${passTasks.length} 条)`));
 
@@ -244,15 +267,10 @@ export function registerReviewCommand(program: Command): void {
           ]);
 
           for (const task of passTasks) {
-            if (task.reviewStatus === 'approved') continue;
-            task.reviewed = true;
-            task.reviewStatus = 'approved';
-            task.reviewComment = commentAnswer.comment;
-            task.reviewedAt = new Date().toISOString();
-            addTask(task);
-            approved++;
+            applyReview(task, 'approved', commentAnswer.comment, 'batch_approve');
           }
-          console.log(chalk.green(`  ✓ 已批准 ${approved} 条质检通过的任务\n`));
+          const passApproved = passTasks.filter(t => t.reviewStatus === 'approved').length;
+          console.log(chalk.green(`  ✓ 已批准 ${passApproved} 条质检通过的任务\n`));
         } else {
           console.log(chalk.gray('  跳过质检通过的任务，逐条处理\n'));
           skipped += passTasks.length;
@@ -340,12 +358,7 @@ export function registerReviewCommand(program: Command): void {
                   message: '审核备注（可留空）:',
                 },
               ]);
-              task.reviewed = true;
-              task.reviewStatus = 'approved';
-              task.reviewComment = commentAnswer.comment;
-              task.reviewedAt = new Date().toISOString();
-              addTask(task);
-              approved++;
+              applyReview(task, 'approved', commentAnswer.comment);
             } else if (action.choice === 'reject') {
               const commentAnswer = await inquirer.prompt([
                 {
@@ -355,12 +368,7 @@ export function registerReviewCommand(program: Command): void {
                   default: '',
                 },
               ]);
-              task.reviewed = true;
-              task.reviewStatus = 'rejected';
-              task.reviewComment = commentAnswer.comment;
-              task.reviewedAt = new Date().toISOString();
-              addTask(task);
-              rejected++;
+              applyReview(task, 'rejected', commentAnswer.comment);
             } else if (action.choice === 'view') {
               console.log('\n' + task.output + '\n');
               i--;
@@ -368,14 +376,7 @@ export function registerReviewCommand(program: Command): void {
               skipped++;
             } else if (action.choice === 'approve-rest') {
               for (let j = i; j < warningTasks.length; j++) {
-                const t = warningTasks[j];
-                if (t.reviewStatus === 'approved') continue;
-                t.reviewed = true;
-                t.reviewStatus = 'approved';
-                t.reviewComment = '批量批准';
-                t.reviewedAt = new Date().toISOString();
-                addTask(t);
-                approved++;
+                applyReview(warningTasks[j], 'approved', '批量批准', 'batch_approve');
               }
               break;
             } else if (action.choice === 'exit') {
@@ -415,13 +416,7 @@ export function registerReviewCommand(program: Command): void {
             ]);
 
             for (const task of failQcTasks) {
-              if (task.reviewStatus === 'rejected') continue;
-              task.reviewed = true;
-              task.reviewStatus = 'rejected';
-              task.reviewComment = commentAnswer.comment;
-              task.reviewedAt = new Date().toISOString();
-              addTask(task);
-              rejected++;
+              applyReview(task, 'rejected', commentAnswer.comment, 'batch_reject');
             }
             console.log(chalk.red(`  ✗ 已拒绝 ${failQcTasks.length} 条质检失败的任务\n`));
           } else if (choice.action === 'skip-all') {
@@ -464,12 +459,7 @@ export function registerReviewCommand(program: Command): void {
                     message: '审核备注（可留空）:',
                   },
                 ]);
-                task.reviewed = true;
-                task.reviewStatus = 'approved';
-                task.reviewComment = commentAnswer.comment;
-                task.reviewedAt = new Date().toISOString();
-                addTask(task);
-                approved++;
+                applyReview(task, 'approved', commentAnswer.comment);
               } else if (action.choice === 'reject') {
                 const commentAnswer = await inquirer.prompt([
                   {
@@ -479,12 +469,7 @@ export function registerReviewCommand(program: Command): void {
                     default: '',
                   },
                 ]);
-                task.reviewed = true;
-                task.reviewStatus = 'rejected';
-                task.reviewComment = commentAnswer.comment;
-                task.reviewedAt = new Date().toISOString();
-                addTask(task);
-                rejected++;
+                applyReview(task, 'rejected', commentAnswer.comment);
               } else if (action.choice === 'view') {
                 console.log('\n' + task.output + '\n');
                 i--;
@@ -492,14 +477,7 @@ export function registerReviewCommand(program: Command): void {
                 skipped++;
               } else if (action.choice === 'reject-rest') {
                 for (let j = i; j < failQcTasks.length; j++) {
-                  const t = failQcTasks[j];
-                  if (t.reviewStatus === 'rejected') continue;
-                  t.reviewed = true;
-                  t.reviewStatus = 'rejected';
-                  t.reviewComment = '批量拒绝';
-                  t.reviewedAt = new Date().toISOString();
-                  addTask(t);
-                  rejected++;
+                  applyReview(failQcTasks[j], 'rejected', '批量拒绝', 'batch_reject');
                 }
                 break;
               } else if (action.choice === 'exit') {
@@ -754,15 +732,10 @@ export function registerReviewCommand(program: Command): void {
 
       let tasks = [...batch.tasks];
 
-      if (options.unassigned) {
-        tasks = tasks.filter(t => !t.assignee);
-      }
-
       if (options.byRange) {
         const [start, end] = options.byRange.split('-').map(Number);
         if (!isNaN(start) && !isNaN(end)) {
-          const allTasks = [...batch.tasks];
-          tasks = allTasks.slice(start - 1, end);
+          tasks = tasks.slice(start - 1, end);
         }
       }
 
@@ -779,6 +752,10 @@ export function registerReviewCommand(program: Command): void {
         tasks = tasks.filter(t =>
           t.sourceFile?.includes(options.byFile) || t.taskName.includes(options.byFile)
         );
+      }
+
+      if (options.unassigned) {
+        tasks = tasks.filter(t => !t.assignee);
       }
 
       if (tasks.length === 0) {

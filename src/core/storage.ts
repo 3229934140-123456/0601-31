@@ -79,6 +79,16 @@ export function getTask(taskId: string, cwd: string = process.cwd()): TaskResult
   return history.tasks.find(t => t.id === taskId);
 }
 
+export function getTaskBatchId(taskId: string, cwd: string = process.cwd()): string | undefined {
+  const history = loadHistory(cwd);
+  for (const batch of history.batches) {
+    if (batch.tasks.some(t => t.id === taskId)) {
+      return batch.id;
+    }
+  }
+  return undefined;
+}
+
 export function addBatch(batch: BatchJob, cwd: string = process.cwd()): void {
   const history = loadHistory(cwd);
   const existingIndex = history.batches.findIndex(b => b.id === batch.id);

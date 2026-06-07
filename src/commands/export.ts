@@ -4,7 +4,7 @@ const chalk = require('chalk');
 const ora = require('ora');
 import * as fs from 'fs';
 import * as path from 'path';
-import { loadHistory, getBatch, ensureOutputDir, saveExportPreset, getExportPreset, loadExportPresets, deleteExportPreset } from '../core/storage';
+import { loadHistory, getBatch, ensureOutputDir, saveExportPreset, getExportPreset, loadExportPresets, deleteExportPreset, getReviewLogs } from '../core/storage';
 import { formatCost } from '../core/cost';
 import { formatDate, generateId } from '../utils';
 import { ExportPreset } from '../types';
@@ -118,9 +118,121 @@ function buildRecords(tasks: any[], fieldIds: string[]): any[] {
   });
 }
 
+function buildRecordsWithHistory(tasks: any[], fieldIds: string[], allLogs: any[]): any[] {
+  const result: any[] = [];
+  const REVIEW_LOG_FIELDS = [
+    { id: 'review_log_time', label: '审核流水时间' },
+    { id: 'review_log_action', label: '审核流水操作' },
+    { id: 'review_log_comment', label: '审核流水备注' },
+  ];
+
+  for (const task of tasks) {
+    const baseRecord: any = {};
+    for (const fieldId of fieldIds) {
+      switch (fieldId) {
+        case 'id':
+          baseRecord.id = task.id;
+          break;
+        case 'taskName':
+          baseRecord.taskName = task.taskName;
+          break;
+        case 'templateName':
+          baseRecord.templateName = task.templateName;
+          break;
+        case 'sourceFile':
+          baseRecord.sourceFile = task.sourceFile ? path.basename(task.sourceFile) : '';
+          break;
+        case 'status':
+          baseRecord.status = task.status;
+          break;
+        case 'model':
+          baseRecord.model = task.model;
+          break;
+        case 'createdAt':
+          baseRecord.createdAt = task.createdAt;
+          break;
+        case 'completedAt':
+          baseRecord.completedAt = task.completedAt || '';
+          break;
+        case 'input':
+          baseRecord.input = task.input ? JSON.stringify(task.input) : '';
+          break;
+        case 'output':
+          baseRecord.output = task.output || '';
+          break;
+        case 'reviewStatus':
+          baseRecord.reviewStatus = task.reviewStatus || 'pending';
+          break;
+        case 'reviewComment':
+          baseRecord.reviewComment = task.reviewComment || '';
+          break;
+        case 'qc_overall':
+          baseRecord.qc_overall = task.qualityCheck?.overall || '';
+          break;
+        case 'qc_sensitiveWords':
+          baseRecord.qc_sensitiveWords = task.qualityCheck?.sensitiveWords?.join('、') || '';
+          break;
+        case 'qc_tone':
+          baseRecord.qc_tone = task.qualityCheck?.toneLabel || '';
+          break;
+        case 'qc_readability':
+          baseRecord.qc_readability = task.qualityCheck?.readabilityScore || '';
+          break;
+        case 'inputTokens':
+          baseRecord.inputTokens = task.tokens?.input || 0;
+          break;
+        case 'outputTokens':
+          baseRecord.outputTokens = task.tokens?.output || 0;
+          break;
+        case 'totalTokens':
+          baseRecord.totalTokens = task.tokens?.total || 0;
+          break;
+        case 'cost':
+          baseRecord.cost = task.cost?.toFixed?.(6) ?? task.cost;
+          break;
+      }
+    }
+
+    const taskLogs = allLogs.filter(l => l.taskId === task.id).sort((a, b) =>
+      new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+
+    if (taskLogs.length === 0) {
+      result.push({
+        ...baseRecord,
+        review_log_time: '',
+        review_log_action: '',
+        review_log_comment: '',
+      });
+    } else {
+      for (const log of taskLogs) {
+        result.push({
+          ...baseRecord,
+          review_log_time: log.timestamp,
+          review_log_action: log.action,
+          review_log_comment: log.comment || '',
+        });
+      }
+    }
+  }
+
+  return result;
+}
+
+function getHistoryFieldLabels(): { id: string; label: string }[] {
+  return [
+    { id: 'review_log_time', label: '审核流水时间' },
+    { id: 'review_log_action', label: '审核流水操作' },
+    { id: 'review_log_comment', label: '审核流水备注' },
+  ];
+}
+
 function fieldLabel(id: string): string {
   const f = EXPORT_FIELDS.find(f => f.id === id);
-  return f ? f.label : id;
+  if (f) return f.label;
+  const hf = getHistoryFieldLabels().find(h => h.id === id);
+  if (hf) return hf.label;
+  return id;
 }
 
 function generateOutputFileName(prefix: string, batchId: string | undefined, ext: string): string {
@@ -129,7 +241,7 @@ function generateOutputFileName(prefix: string, batchId: string | undefined, ext
   return `${prefix}${batchPart}_${timestamp}.${ext}`;
 }
 
-function printExportPreview(tasks: any[], fieldIds: string[]): void {
+function printExportPreview(tasks: any[], fieldIds: string[], withHistory: boolean = false): void {
   const total = tasks.length;
   const successCount = tasks.filter(t => t.status === 'success').length;
   const failedCount = tasks.filter(t => t.status === 'failed').length;
@@ -145,6 +257,9 @@ function printExportPreview(tasks: any[], fieldIds: string[]): void {
   console.log(`审核状态: ${chalk.green(`已通过 ${approvedCount}`)} / ${chalk.red(`已拒绝 ${rejectedCount}`)} / ${chalk.yellow(`待审核 ${pendingCount}`)}`);
   console.log(`总成本: ${formatCost(totalCost)}`);
   console.log(`导出字段: ${fieldIds.length} 个 (${fieldIds.map(fieldLabel).join(', ')})`);
+  if (withHistory) {
+    console.log(chalk.magenta(`附带审核流水: 是（按流水展开，无流水任务保留空行）`));
+  }
   console.log('');
 }
 
@@ -212,6 +327,7 @@ export function registerExportCommand(program: Command): void {
     .option('--only-pending', '只导出待审核的')
     .option('--only-success', '只导出执行成功的')
     .option('--only-failed', '只导出执行失败的')
+    .option('--with-review-history', '附带审核流水记录')
     .option('-y, --yes', '非交互模式，直接导出')
     .action(async (options) => {
       const history = loadHistory();
@@ -276,7 +392,7 @@ export function registerExportCommand(program: Command): void {
         fieldIds = getDefaultFieldIds();
       }
 
-      printExportPreview(tasks, fieldIds);
+      printExportPreview(tasks, fieldIds, options.withReviewHistory);
 
       if (!options.yes && !options.selectFields) {
         const confirm = await inquirer.prompt([
@@ -300,17 +416,25 @@ export function registerExportCommand(program: Command): void {
       try {
         const createCsvWriter = require('csv-writer').createObjectCsvWriter;
 
-        const headers = fieldIds.map((id: string) => ({
+        let headers = fieldIds.map((id: string) => ({
           id,
           title: fieldLabel(id),
         }));
+
+        let records;
+        if (options.withReviewHistory) {
+          const allLogs = getReviewLogs({ batchId: options.batch });
+          records = buildRecordsWithHistory(tasks, fieldIds, allLogs);
+          headers = [...headers, ...getHistoryFieldLabels().map(f => ({ id: f.id, title: f.label }))];
+        } else {
+          records = buildRecords(tasks, fieldIds);
+        }
 
         const csvWriter = createCsvWriter({
           path: outputFile,
           header: headers,
         });
 
-        const records = buildRecords(tasks, fieldIds);
         const safeRecords = records.map(r => {
           const safe: any = {};
           for (const key of Object.keys(r)) {
@@ -324,7 +448,7 @@ export function registerExportCommand(program: Command): void {
         await csvWriter.writeRecords(safeRecords);
 
         spinner.succeed(`导出成功: ${outputFile}`);
-        console.log(chalk.gray(`共导出 ${tasks.length} 条记录`));
+        console.log(chalk.gray(`共导出 ${records.length} 条记录（任务 ${tasks.length} 条）`));
 
       } catch (error: any) {
         spinner.fail('导出失败');
@@ -344,6 +468,7 @@ export function registerExportCommand(program: Command): void {
     .option('--only-pending', '只导出待审核的')
     .option('--only-success', '只导出执行成功的')
     .option('--only-failed', '只导出执行失败的')
+    .option('--with-review-history', '附带审核流水记录')
     .option('-y, --yes', '非交互模式，直接导出')
     .action(async (options) => {
       const history = loadHistory();
@@ -408,7 +533,7 @@ export function registerExportCommand(program: Command): void {
         fieldIds = getDefaultFieldIds();
       }
 
-      printExportPreview(tasks, fieldIds);
+      printExportPreview(tasks, fieldIds, options.withReviewHistory);
 
       if (!options.yes && !options.selectFields) {
         const confirm = await inquirer.prompt([
@@ -431,7 +556,13 @@ export function registerExportCommand(program: Command): void {
       try {
         const XLSX = require('xlsx');
 
-        const records = buildRecords(tasks, fieldIds);
+        let records;
+        if (options.withReviewHistory) {
+          const allLogs = getReviewLogs({ batchId: options.batch });
+          records = buildRecordsWithHistory(tasks, fieldIds, allLogs);
+        } else {
+          records = buildRecords(tasks, fieldIds);
+        }
         const labeled = records.map(r => {
           const out: any = {};
           for (const key of Object.keys(r)) {
@@ -447,7 +578,7 @@ export function registerExportCommand(program: Command): void {
         XLSX.writeFile(wb, outputFile);
 
         spinner.succeed(`导出成功: ${outputFile}`);
-        console.log(chalk.gray(`共导出 ${tasks.length} 条记录`));
+        console.log(chalk.gray(`共导出 ${records.length} 条记录（任务 ${tasks.length} 条）`));
 
       } catch (error: any) {
         spinner.fail('导出失败');
