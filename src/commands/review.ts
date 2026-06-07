@@ -4,12 +4,12 @@ const chalk = require('chalk');
 const ora = require('ora');
 import * as path from 'path';
 import { loadConfig } from '../core/config';
-import { getTask, addTask, getBatch, loadHistory } from '../core/storage';
+import { getTask, addTask, getBatch, loadHistory, addReviewLog, getReviewLogs } from '../core/storage';
 import { callAIWithRetry } from '../core/ai-client';
 import { checkQuality, rewriteTonePrompt, summaryPrompt } from '../core/quality';
 import { formatCost } from '../core/cost';
-import { TaskResult, TaskResultVersion } from '../types';
-import { formatDate } from '../utils';
+import { TaskResult, TaskResultVersion, ReviewLogEntry } from '../types';
+import { formatDate, generateId } from '../utils';
 
 export function registerReviewCommand(program: Command): void {
   const reviewCmd = program
@@ -87,7 +87,7 @@ export function registerReviewCommand(program: Command): void {
       ]);
 
       switch (action.choice) {
-        case 'approve':
+        case 'approve': {
           task.reviewed = true;
           task.reviewStatus = 'approved';
           const noteApprove = await inquirer.prompt([{
@@ -96,11 +96,20 @@ export function registerReviewCommand(program: Command): void {
             message: '审核备注 (可选):',
           }]);
           task.reviewNotes = noteApprove.notes || '批准发布';
+          task.reviewComment = noteApprove.notes || '批准发布';
+          task.reviewedAt = new Date().toISOString();
           addTask(task);
+          logReviewAction({
+            taskId: task.id,
+            action: 'approve',
+            comment: noteApprove.notes || '批准发布',
+            reviewStatusAfter: 'approved',
+          });
           console.log(chalk.green('✓ 已批准'));
           break;
+        }
 
-        case 'reject':
+        case 'reject': {
           task.reviewed = true;
           task.reviewStatus = 'rejected';
           const noteReject = await inquirer.prompt([{
@@ -109,9 +118,18 @@ export function registerReviewCommand(program: Command): void {
             message: '拒绝原因:',
           }]);
           task.reviewNotes = noteReject.notes;
+          task.reviewComment = noteReject.notes;
+          task.reviewedAt = new Date().toISOString();
           addTask(task);
+          logReviewAction({
+            taskId: task.id,
+            action: 'reject',
+            comment: noteReject.notes,
+            reviewStatusAfter: 'rejected',
+          });
           console.log(chalk.red('✗ 已拒绝'));
           break;
+        }
 
         case 'rewrite':
           await handleRewrite(task, config);
@@ -125,16 +143,23 @@ export function registerReviewCommand(program: Command): void {
           await handleNewVersion(task, config);
           break;
 
-        case 'note':
+        case 'note': {
           const note = await inquirer.prompt([{
             type: 'editor',
             name: 'notes',
             message: '备注内容:',
           }]);
           task.reviewNotes = note.notes;
+          task.reviewComment = note.notes;
           addTask(task);
+          logReviewAction({
+            taskId: task.id,
+            action: 'comment',
+            comment: note.notes,
+          });
           console.log(chalk.green('✓ 备注已保存'));
           break;
+        }
 
         case 'exit':
           console.log(chalk.gray('已退出审核'));
@@ -633,6 +658,164 @@ export function registerReviewCommand(program: Command): void {
       console.log(table.toString());
       console.log(chalk.gray(`\n共 ${pendingTasks.length} 个待审核任务，显示前 ${displayTasks.length} 个`));
     });
+
+  reviewCmd
+    .command('history')
+    .description('查看审核历史记录')
+    .argument('[batchId]', '批量任务ID')
+    .option('-t, --task <taskId>', '按任务ID查看')
+    .option('-n, --limit <number>', '显示数量', parseInt)
+    .action((batchId, options) => {
+      const filter: { taskId?: string; batchId?: string; limit?: number } = {};
+      if (options.task) filter.taskId = options.task;
+      if (batchId) filter.batchId = batchId;
+      if (options.limit) filter.limit = options.limit;
+
+      const logs = getReviewLogs(filter);
+
+      if (logs.length === 0) {
+        console.log(chalk.yellow('暂无审核历史记录'));
+        return;
+      }
+
+      console.log(chalk.bold.cyan('\n📜 审核历史记录\n'));
+
+      const Table = require('cli-table3');
+      const table = new Table({
+        head: [
+          chalk.cyan('时间'),
+          chalk.cyan('操作'),
+          chalk.cyan('任务ID'),
+          chalk.cyan('状态'),
+          chalk.cyan('备注'),
+        ],
+        colWidths: [20, 12, 16, 10, 30],
+      });
+
+      for (const log of logs) {
+        const actionColor = log.action.includes('approve') ? chalk.green :
+          log.action.includes('reject') ? chalk.red :
+            log.action.includes('assign') ? chalk.blue : chalk.yellow;
+
+        const statusDisplay = log.reviewStatusAfter ? (
+          log.reviewStatusAfter === 'approved' ? chalk.green('已通过') :
+            log.reviewStatusAfter === 'rejected' ? chalk.red('已拒绝') : chalk.yellow('待审')
+        ) : '-';
+
+        const commentDisplay = log.comment
+          ? log.comment.substr(0, 25) + (log.comment.length > 25 ? '…' : '')
+          : '-';
+
+        table.push([
+          formatDate(log.timestamp),
+          actionColor(actionLabel(log.action)),
+          log.taskId.substr(0, 12) + '...',
+          statusDisplay,
+          commentDisplay,
+        ]);
+      }
+
+      console.log(table.toString());
+      console.log(chalk.gray(`\n共 ${logs.length} 条记录`));
+      console.log('');
+    });
+
+  reviewCmd
+    .command('assign <batchId>')
+    .description('分配批量任务的复核人')
+    .option('--assignee <name>', '复核人姓名')
+    .option('--by-range <start-end>', '按任务序号范围分配，如 1-10')
+    .option('--by-qc <status>', '按质检状态分配: pass/warning/fail')
+    .option('--by-file <pattern>', '按文件名关键词分配')
+    .option('--unassigned', '只分配给未分配的任务')
+    .action(async (batchId, options) => {
+      const batch = getBatch(batchId);
+      if (!batch) {
+        console.log(chalk.red(`✗ 批量任务不存在: ${batchId}`));
+        return;
+      }
+
+      let assignee = options.assignee;
+      if (!assignee) {
+        const answer = await inquirer.prompt([
+          {
+            type: 'input',
+            name: 'assignee',
+            message: '请输入复核人姓名:',
+          },
+        ]);
+        assignee = answer.assignee;
+      }
+
+      if (!assignee || assignee.trim() === '') {
+        console.log(chalk.red('✗ 复核人姓名不能为空'));
+        return;
+      }
+
+      let tasks = [...batch.tasks];
+
+      if (options.unassigned) {
+        tasks = tasks.filter(t => !t.assignee);
+      }
+
+      if (options.byRange) {
+        const [start, end] = options.byRange.split('-').map(Number);
+        if (!isNaN(start) && !isNaN(end)) {
+          const allTasks = [...batch.tasks];
+          tasks = allTasks.slice(start - 1, end);
+        }
+      }
+
+      if (options.byQc) {
+        tasks = tasks.filter(t => {
+          if (options.byQc === 'pass') return t.qualityCheck?.overall === 'pass';
+          if (options.byQc === 'warning') return t.qualityCheck?.overall === 'warning';
+          if (options.byQc === 'fail') return t.qualityCheck?.overall === 'fail';
+          return true;
+        });
+      }
+
+      if (options.byFile) {
+        tasks = tasks.filter(t =>
+          t.sourceFile?.includes(options.byFile) || t.taskName.includes(options.byFile)
+        );
+      }
+
+      if (tasks.length === 0) {
+        console.log(chalk.yellow('没有匹配的任务可分配'));
+        return;
+      }
+
+      console.log(chalk.cyan(`\n将分配 ${tasks.length} 个任务给 ${assignee}`));
+
+      const confirm = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'confirmed',
+          message: '确认分配？',
+          default: true,
+        },
+      ]);
+
+      if (!confirm.confirmed) {
+        console.log(chalk.gray('已取消分配'));
+        return;
+      }
+
+      for (const task of tasks) {
+        task.assignee = assignee;
+        addTask(task);
+        logReviewAction({
+          taskId: task.id,
+          batchId,
+          action: 'assign',
+          assigneeAfter: assignee,
+        });
+      }
+
+      console.log(chalk.green(`✓ 已将 ${tasks.length} 个任务分配给 ${assignee}`));
+      console.log('');
+    });
 }
 
 function displayQualityResult(qc: any): void {
@@ -806,4 +989,40 @@ async function handleNewVersion(task: TaskResult, config: any): Promise<void> {
     spinner.fail('生成失败');
     console.log(chalk.red(error.message));
   }
+}
+
+function logReviewAction(options: {
+  taskId: string;
+  batchId?: string;
+  action: ReviewLogEntry['action'];
+  operator?: string;
+  comment?: string;
+  reviewStatusAfter?: ReviewLogEntry['reviewStatusAfter'];
+  assigneeAfter?: string;
+}): void {
+  const log: ReviewLogEntry = {
+    id: generateId('log'),
+    taskId: options.taskId,
+    batchId: options.batchId,
+    action: options.action,
+    operator: options.operator,
+    comment: options.comment,
+    timestamp: new Date().toISOString(),
+    reviewStatusAfter: options.reviewStatusAfter,
+    assigneeAfter: options.assigneeAfter,
+  };
+  addReviewLog(log);
+}
+
+function actionLabel(action: string): string {
+  const map: Record<string, string> = {
+    approve: '批准',
+    reject: '拒绝',
+    comment: '备注',
+    assign: '分配',
+    batch_approve: '批量批准',
+    batch_reject: '批量拒绝',
+    batch_assign: '批量分配',
+  };
+  return map[action] || action;
 }

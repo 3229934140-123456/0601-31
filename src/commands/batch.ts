@@ -596,6 +596,9 @@ export function registerBatchCommand(program: Command): void {
     .option('--only-pending', '只显示待审核的')
     .option('--only-failed', '只显示失败的')
     .option('--only-warning', '只显示质检警告的')
+    .option('--assignee <name>', '按复核人筛选')
+    .option('--no-assignee', '只显示未分配的')
+    .option('--show-assignees', '显示复核人统计')
     .action((batchId, options) => {
       const batch = getBatch(batchId);
       if (!batch) {
@@ -617,6 +620,12 @@ export function registerBatchCommand(program: Command): void {
       if (options.onlyWarning) {
         tasks = tasks.filter(t => t.qualityCheck?.overall === 'warning');
       }
+      if (options.assignee) {
+        tasks = tasks.filter(t => t.assignee === options.assignee);
+      }
+      if (options.noAssignee) {
+        tasks = tasks.filter(t => !t.assignee);
+      }
 
       const statusColors: Record<string, any> = {
         running: chalk.blue,
@@ -630,33 +639,82 @@ export function registerBatchCommand(program: Command): void {
       const approvedCount = tasks.filter(t => t.reviewStatus === 'approved').length;
       const rejectedCount = tasks.filter(t => t.reviewStatus === 'rejected').length;
       const pendingReviewCount = tasks.filter(t => !t.reviewStatus || t.reviewStatus === 'pending').length;
+      const successCount = tasks.filter(t => t.status === 'success').length;
+      const failedCount = tasks.filter(t => t.status === 'failed').length;
+
+      const assignees = [...new Set(batch.tasks.map(t => t.assignee).filter(Boolean))];
+      const assigneeStats = assignees.map(name => {
+        const at = batch.tasks.filter(t => t.assignee === name);
+        return {
+          name,
+          total: at.length,
+          approved: at.filter(t => t.reviewStatus === 'approved').length,
+          rejected: at.filter(t => t.reviewStatus === 'rejected').length,
+          pending: at.filter(t => !t.reviewStatus || t.reviewStatus === 'pending').length,
+        };
+      });
+      const unassignedCount = batch.tasks.filter(t => !t.assignee).length;
 
       console.log(chalk.bold.cyan(`\n📦 批量任务详情: ${batch.name}\n`));
       console.log(chalk.cyan('ID: ') + batch.id);
       console.log(chalk.cyan('状态: ') + (statusColors[batch.status]?.(batch.status) || batch.status));
       console.log(chalk.cyan('模板: ') + batch.templateId);
       console.log(chalk.cyan('创建时间: ') + formatDate(batch.createdAt));
-      console.log(chalk.cyan('总任务数: ') + batch.totalTasks);
-      console.log(chalk.green('成功: ') + batch.completedTasks);
-      console.log(chalk.red('失败: ') + batch.failedTasks);
+      console.log(chalk.cyan('批次总任务数: ') + batch.totalTasks);
+      console.log(chalk.green('批次成功: ') + batch.completedTasks);
+      console.log(chalk.red('批次失败: ') + batch.failedTasks);
 
-      let filterDesc = '';
-      if (options.onlyApproved) filterDesc = '已审核通过';
-      else if (options.onlyPending) filterDesc = '待审核';
-      else if (options.onlyFailed) filterDesc = '失败';
-      else if (options.onlyWarning) filterDesc = '质检警告';
+      let filterParts: string[] = [];
+      if (options.onlyApproved) filterParts.push('已审核通过');
+      if (options.onlyPending) filterParts.push('待审核');
+      if (options.onlyFailed) filterParts.push('失败');
+      if (options.onlyWarning) filterParts.push('质检警告');
+      if (options.assignee) filterParts.push(`复核人: ${options.assignee}`);
+      if (options.noAssignee) filterParts.push('未分配');
 
-      if (filterDesc) {
-        console.log(chalk.cyan(`筛选条件: ${filterDesc}`));
-        console.log(chalk.cyan(`显示任务数: ${tasks.length} / ${batch.totalTasks}`));
+      if (filterParts.length > 0) {
+        console.log('');
+        console.log(chalk.cyan(`筛选条件: ${filterParts.join(' + ')}`));
+        console.log(chalk.cyan(`筛选结果: ${tasks.length} / ${batch.totalTasks} 条`));
+        console.log(chalk.cyan(`筛选成功: ${successCount}  / 筛选失败: ${failedCount}`));
       }
 
-      console.log(chalk.cyan('审核统计: ') +
-        chalk.green(`已通过 ${approvedCount}`) + ' / ' +
-        chalk.red(`已拒绝 ${rejectedCount}`) + ' / ' +
-        chalk.yellow(`待审核 ${pendingReviewCount}`));
-      console.log(chalk.cyan('总成本: ') + formatCost(totalCost));
-      console.log(chalk.cyan('总 Token: ') + totalTokens);
+      console.log('');
+      console.log(chalk.cyan('【审核统计'));
+      console.log(chalk.green(`  已通过: ${approvedCount}`));
+      console.log(chalk.red(`  已拒绝: ${rejectedCount}`));
+      console.log(chalk.yellow(`  待审核: ${pendingReviewCount}`));
+      console.log(chalk.cyan(`  总成本: ${formatCost(totalCost)}`));
+      console.log(chalk.cyan(`  总 Token: ${totalTokens}`));
+
+      if (assigneeStats.length > 0 || unassignedCount > 0) {
+        console.log('');
+        console.log(chalk.cyan('【复核人统计'));
+        const Table = require('cli-table3');
+        const assigneeTable = new Table({
+          head: [chalk.cyan('复核人'), chalk.cyan('总数'), chalk.green('已通过'), chalk.red('已拒绝'), chalk.yellow('待处理')],
+          colWidths: [16, 8, 10, 10, 10],
+        });
+        for (const stat of assigneeStats) {
+          assigneeTable.push([
+            stat.name,
+            stat.total,
+            stat.approved,
+            stat.rejected,
+            stat.pending,
+          ]);
+        }
+        if (unassignedCount > 0) {
+          assigneeTable.push([
+            chalk.gray('未分配'),
+            unassignedCount,
+            '-',
+            '-',
+            unassignedCount,
+          ]);
+        }
+        console.log(assigneeTable.toString());
+      }
 
       console.log(chalk.cyan('\n任务列表:'));
       const Table = require('cli-table3');
@@ -664,13 +722,14 @@ export function registerBatchCommand(program: Command): void {
         head: [
           chalk.cyan('#'),
           chalk.cyan('来源文件'),
-          chalk.cyan('执行状态'),
+          chalk.cyan('复核人'),
+          chalk.cyan('执行'),
           chalk.cyan('质检'),
           chalk.cyan('审核'),
           chalk.cyan('审核备注'),
           chalk.cyan('成本'),
         ],
-        colWidths: [5, 28, 10, 8, 10, 24, 10],
+        colWidths: [4, 22, 10, 8, 8, 10, 22, 8],
       });
 
       tasks.forEach((task, idx) => {
@@ -687,21 +746,26 @@ export function registerBatchCommand(program: Command): void {
         } else if (task.reviewStatus === 'rejected') {
           reviewDisplay = chalk.red('✗ 拒绝');
         } else {
-          reviewDisplay = chalk.yellow('待审核');
+          reviewDisplay = chalk.yellow('待审');
         }
 
         const reviewComment = task.reviewComment
-          ? task.reviewComment.substr(0, 20) + (task.reviewComment.length > 20 ? '...' : '')
+          ? task.reviewComment.substr(0, 18) + (task.reviewComment.length > 18 ? '…' : '')
           : '-';
 
         const sourceFile = task.sourceFile
-          ? path.basename(task.sourceFile).substr(0, 25)
-          : task.taskName.substr(0, 25);
+          ? path.basename(task.sourceFile).substr(0, 20)
+          : task.taskName.substr(0, 20);
+
+        const assigneeName = task.assignee
+          ? String(task.assignee).substr(0, 8)
+          : chalk.gray('-');
 
         table.push([
           String(idx + 1),
           sourceFile,
-          taskStatusColor(task.status),
+          assigneeName,
+          taskStatusColor(task.status === 'success' ? '成功' : task.status === 'failed' ? '失败' : task.status),
           qcStatus,
           reviewDisplay,
           reviewComment,

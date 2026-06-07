@@ -66,9 +66,32 @@ export interface TaskResult {
   reviewNotes?: string;
   reviewComment?: string;
   reviewedAt?: string;
+  reviewedBy?: string;
+  assignee?: string;
   qualityCheck?: QualityCheckResult;
   versions?: TaskResultVersion[];
   sourceFile?: string;
+}
+
+export interface ReviewLogEntry {
+  id: string;
+  taskId: string;
+  batchId?: string;
+  action: 'approve' | 'reject' | 'comment' | 'assign' | 'batch_approve' | 'batch_reject' | 'batch_assign';
+  operator?: string;
+  comment?: string;
+  timestamp: string;
+  reviewStatusAfter?: 'approved' | 'rejected' | 'pending';
+  assigneeAfter?: string;
+}
+
+export interface ExportPreset {
+  id: string;
+  name: string;
+  description: string;
+  fields: string[];
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface TaskResultVersion {

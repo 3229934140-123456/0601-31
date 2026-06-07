@@ -4,9 +4,10 @@ const chalk = require('chalk');
 const ora = require('ora');
 import * as fs from 'fs';
 import * as path from 'path';
-import { loadHistory, getBatch, ensureOutputDir } from '../core/storage';
+import { loadHistory, getBatch, ensureOutputDir, saveExportPreset, getExportPreset, loadExportPresets, deleteExportPreset } from '../core/storage';
 import { formatCost } from '../core/cost';
 import { formatDate, generateId } from '../utils';
+import { ExportPreset } from '../types';
 
 interface ExportField {
   id: string;
@@ -206,6 +207,7 @@ export function registerExportCommand(program: Command): void {
     .option('-o, --output <file>', '输出文件路径')
     .option('--fields <fields...>', '指定导出字段')
     .option('--select-fields', '交互式选择导出字段')
+    .option('--preset <name>', '使用导出预设')
     .option('--only-approved', '只导出已审核通过的')
     .option('--only-pending', '只导出待审核的')
     .option('--only-success', '只导出执行成功的')
@@ -243,7 +245,24 @@ export function registerExportCommand(program: Command): void {
       }
 
       let fieldIds: string[];
-      if (options.fields && options.fields.length > 0) {
+      if (options.preset) {
+        const preset = getExportPreset(options.preset);
+        if (!preset) {
+          console.log(chalk.red(`✗ 导出预设不存在: ${options.preset}`));
+          console.log(chalk.gray('可用预设:'));
+          const presets = loadExportPresets();
+          if (presets.length === 0) {
+            console.log(chalk.gray('  (暂无预设，使用 export preset create 创建)'));
+          } else {
+            for (const p of presets) {
+              console.log(chalk.gray(`  - ${p.name} (${p.fields.length} 个字段)`));
+            }
+          }
+          return;
+        }
+        fieldIds = preset.fields;
+        console.log(chalk.cyan(`使用预设: ${preset.name} (${fieldIds.length} 个字段)`));
+      } else if (options.fields && options.fields.length > 0) {
         fieldIds = options.fields.filter((f: string) =>
           EXPORT_FIELDS.some(ef => ef.id === f)
         );
@@ -320,6 +339,7 @@ export function registerExportCommand(program: Command): void {
     .option('-o, --output <file>', '输出文件路径')
     .option('--fields <fields...>', '指定导出字段')
     .option('--select-fields', '交互式选择导出字段')
+    .option('--preset <name>', '使用导出预设')
     .option('--only-approved', '只导出已审核通过的')
     .option('--only-pending', '只导出待审核的')
     .option('--only-success', '只导出执行成功的')
@@ -357,7 +377,24 @@ export function registerExportCommand(program: Command): void {
       }
 
       let fieldIds: string[];
-      if (options.fields && options.fields.length > 0) {
+      if (options.preset) {
+        const preset = getExportPreset(options.preset);
+        if (!preset) {
+          console.log(chalk.red(`✗ 导出预设不存在: ${options.preset}`));
+          console.log(chalk.gray('可用预设:'));
+          const presets = loadExportPresets();
+          if (presets.length === 0) {
+            console.log(chalk.gray('  (暂无预设，使用 export preset create 创建)'));
+          } else {
+            for (const p of presets) {
+              console.log(chalk.gray(`  - ${p.name} (${p.fields.length} 个字段)`));
+            }
+          }
+          return;
+        }
+        fieldIds = preset.fields;
+        console.log(chalk.cyan(`使用预设: ${preset.name} (${fieldIds.length} 个字段)`));
+      } else if (options.fields && options.fields.length > 0) {
         fieldIds = options.fields.filter((f: string) =>
           EXPORT_FIELDS.some(ef => ef.id === f)
         );
@@ -553,6 +590,159 @@ export function registerExportCommand(program: Command): void {
       } catch (error: any) {
         console.log(chalk.red(`生成失败: ${error.message}`));
       }
+    });
+
+  const presetCmd = exportCmd
+    .command('preset')
+    .description('导出预设管理');
+
+  presetCmd
+    .command('list')
+    .description('列出所有导出预设')
+    .action(() => {
+      const presets = loadExportPresets();
+
+      if (presets.length === 0) {
+        console.log(chalk.yellow('暂无导出预设'));
+        console.log(chalk.gray('使用 export preset create 创建预设'));
+        return;
+      }
+
+      console.log(chalk.bold.cyan('\n📋 导出预设列表\n'));
+
+      const Table = require('cli-table3');
+      const table = new Table({
+        head: [chalk.cyan('预设名称'), chalk.cyan('描述'), chalk.cyan('字段数'), chalk.cyan('更新时间')],
+        colWidths: [20, 30, 10, 22],
+      });
+
+      for (const preset of presets) {
+        table.push([
+          preset.name,
+          preset.description.substr(0, 25),
+          preset.fields.length,
+          formatDate(preset.updatedAt),
+        ]);
+      }
+
+      console.log(table.toString());
+      console.log(chalk.gray(`\n共 ${presets.length} 个预设`));
+      console.log('');
+    });
+
+  presetCmd
+    .command('create')
+    .description('创建新的导出预设')
+    .option('-n, --name <name>', '预设名称')
+    .option('-d, --desc <description>', '描述')
+    .option('--fields <fields...>', '预设字段列表')
+    .action(async (options) => {
+      let name = options.name;
+      let description = options.desc || '';
+      let fieldIds = options.fields || [];
+
+      if (!name) {
+        const answer = await inquirer.prompt([
+          {
+            type: 'input',
+            name: 'name',
+            message: '预设名称:',
+            validate: (val: string) => val.trim() !== '' || '名称不能为空',
+          },
+        ]);
+        name = answer.name;
+      }
+
+      if (!description) {
+        const answer = await inquirer.prompt([
+          {
+            type: 'input',
+            name: 'description',
+            message: '预设描述（可选）:',
+          },
+        ]);
+        description = answer.description;
+      }
+
+      if (fieldIds.length === 0) {
+        fieldIds = await selectFieldsInteractive(getDefaultFieldIds());
+      }
+
+      if (fieldIds.length === 0) {
+        console.log(chalk.red('✗ 至少选择一个字段'));
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const preset: ExportPreset = {
+        id: generateId('preset'),
+        name,
+        description,
+        fields: fieldIds,
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      saveExportPreset(preset);
+      console.log(chalk.green(`✓ 预设 "${name}" 创建成功`));
+      console.log(chalk.gray(`包含 ${fieldIds.length} 个字段: ${fieldIds.join(', ')}`));
+      console.log('');
+    });
+
+  presetCmd
+    .command('view <name>')
+    .description('查看预设详情')
+    .action((name) => {
+      const preset = getExportPreset(name);
+
+      if (!preset) {
+        console.log(chalk.red(`✗ 预设不存在: ${name}`));
+        return;
+      }
+
+      console.log(chalk.bold.cyan(`\n📋 预设详情: ${preset.name}\n`));
+      console.log(chalk.cyan('ID: ') + preset.id);
+      console.log(chalk.cyan('描述: ') + (preset.description || '-'));
+      console.log(chalk.cyan('字段数: ') + preset.fields.length);
+      console.log(chalk.cyan('创建时间: ') + formatDate(preset.createdAt));
+      console.log(chalk.cyan('更新时间: ') + formatDate(preset.updatedAt));
+      console.log(chalk.cyan('\n字段列表:'));
+
+      for (const fieldId of preset.fields) {
+        const field = EXPORT_FIELDS.find(f => f.id === fieldId);
+        if (field) {
+          console.log(`  • ${field.label} (${field.category})`);
+        }
+      }
+      console.log('');
+    });
+
+  presetCmd
+    .command('delete <name>')
+    .description('删除导出预设')
+    .action(async (name) => {
+      const preset = getExportPreset(name);
+      if (!preset) {
+        console.log(chalk.red(`✗ 预设不存在: ${name}`));
+        return;
+      }
+
+      const confirm = await inquirer.prompt([
+        {
+          type: 'confirm',
+          name: 'confirmed',
+          message: `确定删除预设 "${name}"？`,
+          default: false,
+        },
+      ]);
+
+      if (!confirm.confirmed) {
+        console.log(chalk.gray('已取消删除'));
+        return;
+      }
+
+      deleteExportPreset(preset.id);
+      console.log(chalk.green(`✓ 预设 "${name}" 已删除`));
     });
 }
 
